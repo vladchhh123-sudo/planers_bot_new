@@ -12,7 +12,10 @@ class Config:
     bot_token: str
     project_dir: Path
     assets_dir: Path
+    data_dir: Path
+    analytics_db_path: Path
     log_level: str
+    admin_ids: tuple[int, ...]
 
     @classmethod
     def load(cls) -> "Config":
@@ -29,9 +32,27 @@ class Config:
 
         log_level = os.getenv("LOG_LEVEL", "INFO").upper()
         assets_dir = project_dir / "assets"
+
+        data_dir = Path(os.getenv("DATA_DIR", str(project_dir / "data"))).resolve()
+        data_dir.mkdir(parents=True, exist_ok=True)
+
+        analytics_db_path = Path(
+            os.getenv("ANALYTICS_DB_PATH", str(data_dir / "analytics.sqlite3"))
+        ).resolve()
+
+        admin_ids_raw = os.getenv("ADMIN_IDS", "")
+        admin_ids = tuple(
+            int(part.strip())
+            for part in admin_ids_raw.split(",")
+            if part.strip().isdigit()
+        )
+
         return cls(
             bot_token=bot_token,
             project_dir=project_dir,
             assets_dir=assets_dir,
+            data_dir=data_dir,
+            analytics_db_path=analytics_db_path,
             log_level=log_level,
+            admin_ids=admin_ids,
         )

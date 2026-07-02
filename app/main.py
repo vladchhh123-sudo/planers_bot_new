@@ -10,6 +10,8 @@ from aiogram.enums import ChatAction, ParseMode
 from aiogram.filters import Command
 from aiogram.types import BotCommand, CallbackQuery, Message
 
+from .admin_panel import router as admin_router, setup_admin_panel
+from .analytics import AnalyticsService
 from .catalog import (
     BUNDLES,
     BUNDLES_LANDING_TEXT,
@@ -47,6 +49,28 @@ from .utils import render_text, user_first_name
 
 router = Router()
 logger = logging.getLogger(__name__)
+analytics_service: AnalyticsService | None = None
+
+
+def track_user(user: object) -> None:
+    if analytics_service and user is not None:
+        analytics_service.identify_user(user)
+
+
+def track_event(
+    user: object,
+    event_type: str,
+    *,
+    step: str | None = None,
+    payload: dict | None = None,
+) -> None:
+    if analytics_service and user is not None:
+        analytics_service.track_event(user, event_type=event_type, step=step, payload=payload)
+
+
+def track_step(user: object, step: str, *, payload: dict | None = None) -> None:
+    if analytics_service and user is not None:
+        analytics_service.track_step(user, step=step, payload=payload)
 
 
 async def send_missing_media_notice(target: Message | CallbackQuery) -> None:
@@ -60,7 +84,13 @@ async def send_missing_media_notice(target: Message | CallbackQuery) -> None:
         await target.answer(text)
 
 
-async def send_product_album(callback: CallbackQuery, product_id: str, source: str, config: Config) -> None:
+async def send_product_album(
+    callback: CallbackQuery,
+    product_id: str,
+    source: str,
+    config: Config,
+) -> None:
+    track_event(callback.from_user, "callback", payload={"data": callback.data})
     product = PRODUCTS[product_id]
     name = user_first_name(callback.from_user)
     caption = render_text(product.album_caption, name=name)
@@ -80,6 +110,7 @@ async def send_product_album(callback: CallbackQuery, product_id: str, source: s
         await send_missing_media_notice(callback)
         return
 
+    track_step(callback.from_user, f"product_{product_id}_card", payload={"source": source})
     await callback.message.answer(
         "Выбери цвет своего планера 🎨",
         reply_markup=choose_color_keyboard(product_id, source, "product"),
@@ -87,8 +118,10 @@ async def send_product_album(callback: CallbackQuery, product_id: str, source: s
 
 
 async def send_bundle_album(callback: CallbackQuery, bundle_id: str, config: Config) -> None:
+    track_event(callback.from_user, "callback", payload={"data": callback.data})
     bundle = BUNDLES[bundle_id]
     chat_id = callback.message.chat.id
+
     try:
         await callback.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
         await send_album(
@@ -104,6 +137,7 @@ async def send_bundle_album(callback: CallbackQuery, bundle_id: str, config: Con
         await send_missing_media_notice(callback)
         return
 
+    track_step(callback.from_user, f"bundle_{bundle_id}_card")
     await callback.message.answer(
         "Выбери цвет своего планера 🎨",
         reply_markup=choose_color_keyboard(bundle_id, "bundle", "bundle"),
@@ -111,6 +145,7 @@ async def send_bundle_album(callback: CallbackQuery, bundle_id: str, config: Con
 
 
 async def send_offer_album(callback: CallbackQuery, config: Config) -> None:
+    track_event(callback.from_user, "callback", payload={"data": callback.data})
     name = user_first_name(callback.from_user)
     caption = render_text(CHANNEL_OFFER_CAPTION, name=name)
     chat_id = callback.message.chat.id
@@ -129,6 +164,7 @@ async def send_offer_album(callback: CallbackQuery, config: Config) -> None:
         await send_missing_media_notice(callback)
         return
 
+    track_step(callback.from_user, "offer_channel_plus")
     await callback.message.answer("Выбери следующий шаг 👇", reply_markup=offer_keyboard())
 
 
@@ -137,6 +173,7 @@ async def send_product_payment(callback: CallbackQuery, product_id: str, color_i
     url = product.payment_urls[color_id]
     name = user_first_name(callback.from_user)
     text = render_text(PAYMENT_TEXT_SINGLE, name=name, url=url)
+    track_step(callback.from_user, f"pay_product_{product_id}_{color_id}")
     await callback.message.answer(text, reply_markup=url_button(BTN_TAKE_THIS_PLANNER, url))
 
 
@@ -145,11 +182,14 @@ async def send_bundle_payment(callback: CallbackQuery, bundle_id: str, color_id:
     url = bundle.payment_urls[color_id]
     name = user_first_name(callback.from_user)
     text = render_text(PAYMENT_TEXT_BUNDLE, name=name, url=url)
+    track_step(callback.from_user, f"pay_bundle_{bundle_id}_{color_id}")
     await callback.message.answer(text, reply_markup=url_button(BTN_TAKE_SET, url))
 
 
 @router.message(Command("start"))
 async def command_start(message: Message) -> None:
+    track_user(message.from_user)
+    track_event(message.from_user, "start_command", step="start_screen")
     name = user_first_name(message.from_user)
     text = render_text(START_TEXT, name=name)
     await message.answer(text, reply_markup=start_keyboard())
@@ -157,11 +197,15 @@ async def command_start(message: Message) -> None:
 
 @router.message(Command("menu"))
 async def command_menu(message: Message) -> None:
+    track_user(message.from_user)
+    track_step(message.from_user, "catalog_menu")
     await message.answer(CATALOG_TEXT, reply_markup=planners_keyboard("main"))
 
 
 @router.callback_query(F.data == "catalog")
 async def open_catalog(callback: CallbackQuery) -> None:
+    track_event(callback.from_user, "callback", payload={"data": callback.data})
+    track_step(callback.from_user, "catalog_menu")
     await callback.answer()
     await callback.message.answer(CATALOG_TEXT, reply_markup=planners_keyboard("main"))
 
@@ -174,33 +218,41 @@ async def open_offer(callback: CallbackQuery, config: Config) -> None:
 
 @router.callback_query(F.data == "offer:channel")
 async def open_channel_payment(callback: CallbackQuery) -> None:
+    track_event(callback.from_user, "callback", payload={"data": callback.data})
     await callback.answer()
     name = user_first_name(callback.from_user)
     text = render_text(PAYMENT_TEXT_CHANNEL, name=name, url=CHANNEL_URL)
+    track_step(callback.from_user, "pay_channel_offer")
     await callback.message.answer(text, reply_markup=url_button(BTN_JOIN_CHANNEL, CHANNEL_URL))
 
 
 @router.callback_query(F.data == "offer:single")
 async def open_offer_fallback(callback: CallbackQuery) -> None:
+    track_event(callback.from_user, "callback", payload={"data": callback.data})
     await callback.answer()
     name = user_first_name(callback.from_user)
     text = render_text(OFFER_FALLBACK_TEXT, name=name, planners=PLANNERS_LIST_BLOCK)
+    track_step(callback.from_user, "offer_take_single")
     await callback.message.answer(text, reply_markup=offer_fallback_keyboard())
 
 
 @router.callback_query(F.data == "offer:planner_menu")
 async def open_offer_fallback_planner_menu(callback: CallbackQuery) -> None:
+    track_event(callback.from_user, "callback", payload={"data": callback.data})
     await callback.answer()
     name = user_first_name(callback.from_user)
     text = render_text(OFFER_FALLBACK_MENU_TEXT, name=name, planners=PLANNERS_LIST_BLOCK)
+    track_step(callback.from_user, "offer_single_planner_menu")
     await callback.message.answer(text, reply_markup=planners_keyboard("return"))
 
 
 @router.callback_query(F.data == "bundles")
 async def open_bundles(callback: CallbackQuery) -> None:
+    track_event(callback.from_user, "callback", payload={"data": callback.data})
     await callback.answer()
     name = user_first_name(callback.from_user)
     text = render_text(BUNDLES_LANDING_TEXT, name=name)
+    track_step(callback.from_user, "bundles_landing")
     await callback.message.answer(text, reply_markup=bundles_keyboard())
 
 
@@ -224,8 +276,10 @@ async def open_bundle(callback: CallbackQuery, config: Config) -> None:
 
 @router.callback_query(F.data.startswith("colors:"))
 async def open_colors(callback: CallbackQuery) -> None:
+    track_event(callback.from_user, "callback", payload={"data": callback.data})
     await callback.answer()
     _, kind, item_id, source = callback.data.split(":", maxsplit=3)
+    track_step(callback.from_user, f"colors_{kind}_{item_id}", payload={"source": source})
     await callback.message.answer(
         "Выбери цвет своего планера 🎨",
         reply_markup=colors_keyboard(item_id, source, kind),
@@ -234,6 +288,7 @@ async def open_colors(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("color:"))
 async def choose_color(callback: CallbackQuery) -> None:
+    track_event(callback.from_user, "callback", payload={"data": callback.data})
     await callback.answer()
     _, kind, item_id, color_id, source = callback.data.split(":", maxsplit=4)
 
@@ -247,7 +302,11 @@ async def choose_color(callback: CallbackQuery) -> None:
             if item_id == "habits" and color_id == "white"
             else MAIN_FLOW_AFTER_COLOR_TEXT
         )
-        await callback.message.answer(text, reply_markup=planner_post_color_keyboard(item_id, color_id))
+        track_step(callback.from_user, f"after_color_{item_id}_{color_id}")
+        await callback.message.answer(
+            text,
+            reply_markup=planner_post_color_keyboard(item_id, color_id),
+        )
         return
 
     if kind == "bundle":
@@ -256,12 +315,23 @@ async def choose_color(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("pay:product:"))
 async def pay_product(callback: CallbackQuery) -> None:
+    track_event(callback.from_user, "callback", payload={"data": callback.data})
     await callback.answer()
     _, _, product_id, color_id = callback.data.split(":", maxsplit=3)
     await send_product_payment(callback, product_id, color_id)
 
 
-async def on_startup(bot: Bot) -> None:
+async def on_startup(bot: Bot, config: Config) -> None:
+    global analytics_service
+
+    if analytics_service is None:
+        analytics_service = AnalyticsService(config.analytics_db_path)
+        analytics_service.initialize()
+
+    setup_admin_panel(analytics_service, config)
+
+    await bot.delete_webhook(drop_pending_updates=False)
+
     commands = [
         BotCommand(command="start", description="Запустить бота"),
         BotCommand(command="menu", description="Открыть каталог планеров"),
@@ -272,6 +342,7 @@ async def on_startup(bot: Bot) -> None:
 async def build_dispatcher(config: Config) -> Dispatcher:
     dp = Dispatcher()
     dp["config"] = config
+    dp.include_router(admin_router)
     dp.include_router(router)
     return dp
 
@@ -295,7 +366,7 @@ async def main() -> None:
     dp = await build_dispatcher(config)
 
     logger.info("Bot is starting")
-    await on_startup(bot)
+    await on_startup(bot, config)
     await dp.start_polling(
         bot,
         allowed_updates=dp.resolve_used_update_types(),
@@ -305,3 +376,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+    

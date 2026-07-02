@@ -1,0 +1,288 @@
+from __future__ import annotations
+
+import csv
+import json
+import sqlite3
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from threading import Lock
+from typing import Any
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def utc_now_iso() -> str:
+    return utc_now().isoformat(timespec="seconds")
+
+
+class AnalyticsService:
+    def __init__(self, db_path: Path) -> None:
+        self.db_path = db_path
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = Lock()
+        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+
+    def initialize(self) -> None:
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT,
+                    first_name TEXT,
+                    last_name TEXT,
+                    is_bot INTEGER NOT NULL DEFAULT 0,
+                    language_code TEXT,
+                    first_seen TEXT NOT NULL,
+                    last_seen TEXT NOT NULL,
+                    last_step TEXT,
+                    current_step_updated_at TEXT,
+                    start_count INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    event_type TEXT NOT NULL,
+                    step TEXT,
+                    payload_json TEXT,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_events_user_id ON events(user_id);
+                CREATE INDEX IF NOT EXISTS idx_events_step ON events(step);
+                CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
+                CREATE INDEX IF NOT EXISTS idx_users_last_step ON users(last_step);
+                CREATE INDEX IF NOT EXISTS idx_users_last_seen ON users(last_seen);
+                """
+            )
+            self._conn.commit()
+
+    def identify_user(self, user: Any) -> None:
+        now = utc_now_iso()
+        user_id = int(user.id)
+        username = getattr(user, "username", None)
+        first_name = getattr(user, "first_name", None)
+        last_name = getattr(user, "last_name", None)
+        is_bot = 1 if getattr(user, "is_bot", False) else 0
+        language_code = getattr(user, "language_code", None)
+
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO users (
+                    user_id, username, first_name, last_name, is_bot,
+                    language_code, first_seen, last_seen
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    username = excluded.username,
+                    first_name = excluded.first_name,
+                    last_name = excluded.last_name,
+                    is_bot = excluded.is_bot,
+                    language_code = excluded.language_code,
+                    last_seen = excluded.last_seen
+                """,
+                (user_id, username, first_name, last_name, is_bot, language_code, now, now),
+            )
+            self._conn.commit()
+
+    def track_event(
+        self,
+        user: Any,
+        event_type: str,
+        step: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        self.identify_user(user)
+        now = utc_now_iso()
+        user_id = int(user.id)
+        payload_json = json.dumps(payload, ensure_ascii=False) if payload else None
+
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO events (user_id, event_type, step, payload_json, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (user_id, event_type, step, payload_json, now),
+            )
+
+            if step:
+                self._conn.execute(
+                    """
+                    UPDATE users
+                    SET last_step = ?, current_step_updated_at = ?, last_seen = ?
+                    WHERE user_id = ?
+                    """,
+                    (step, now, now, user_id),
+                )
+
+            if event_type == "start_command":
+                self._conn.execute(
+                    "UPDATE users SET start_count = start_count + 1 WHERE user_id = ?",
+                    (user_id,),
+                )
+
+            self._conn.commit()
+
+    def track_step(self, user: Any, step: str, payload: dict[str, Any] | None = None) -> None:
+        self.track_event(user=user, event_type="step", step=step, payload=payload)
+
+    def get_summary(self) -> dict[str, Any]:
+        now = utc_now()
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        active_since = now - timedelta(hours=24)
+
+        with self._lock:
+            total_users = self._conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            users_today = self._conn.execute(
+                "SELECT COUNT(*) FROM users WHERE first_seen >= ?",
+                (today_start.isoformat(timespec="seconds"),),
+            ).fetchone()[0]
+            active_24h = self._conn.execute(
+                "SELECT COUNT(*) FROM users WHERE last_seen >= ?",
+                (active_since.isoformat(timespec="seconds"),),
+            ).fetchone()[0]
+            total_events = self._conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+            total_starts = self._conn.execute(
+                "SELECT COALESCE(SUM(start_count), 0) FROM users"
+            ).fetchone()[0]
+            stop_rows = self._conn.execute(
+                """
+                SELECT COALESCE(last_step, 'unknown') AS step, COUNT(*) AS cnt
+                FROM users
+                GROUP BY COALESCE(last_step, 'unknown')
+                ORDER BY cnt DESC, step ASC
+                LIMIT 10
+                """
+            ).fetchall()
+
+        return {
+            "total_users": total_users,
+            "users_today": users_today,
+            "active_24h": active_24h,
+            "total_events": total_events,
+            "total_starts": total_starts,
+            "top_stops": [(row["step"], row["cnt"]) for row in stop_rows],
+        }
+
+    def get_funnel(self) -> list[tuple[str, int]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT step, COUNT(DISTINCT user_id) AS cnt
+                FROM events
+                WHERE step IS NOT NULL
+                GROUP BY step
+                ORDER BY cnt DESC, step ASC
+                """
+            ).fetchall()
+        return [(row["step"], row["cnt"]) for row in rows]
+
+    def get_recent_users(self, limit: int = 20) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(limit, 10000))
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT user_id, username, first_name, last_name, first_seen, last_seen, last_step, start_count
+                FROM users
+                ORDER BY last_seen DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_all_users(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT user_id, username, first_name, last_name, first_seen, last_seen, last_step, start_count
+                FROM users
+                ORDER BY last_seen DESC
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_user_details(self, user_id: int, event_limit: int = 25) -> dict[str, Any] | None:
+        with self._lock:
+            user_row = self._conn.execute(
+                """
+                SELECT user_id, username, first_name, last_name, language_code,
+                       first_seen, last_seen, last_step, current_step_updated_at, start_count
+                FROM users WHERE user_id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+            if not user_row:
+                return None
+
+            event_rows = self._conn.execute(
+                """
+                SELECT id, event_type, step, payload_json, created_at
+                FROM events
+                WHERE user_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (user_id, max(1, min(event_limit, 100))),
+            ).fetchall()
+
+        return {
+            "user": dict(user_row),
+            "events": [dict(row) for row in event_rows],
+        }
+
+    def export_users_csv(self, export_dir: Path) -> Path:
+        export_dir.mkdir(parents=True, exist_ok=True)
+        file_path = export_dir / f"users_{utc_now().strftime('%Y%m%d_%H%M%S')}.csv"
+        rows = self.get_all_users()
+
+        with file_path.open("w", newline="", encoding="utf-8") as file:
+            writer = csv.DictWriter(
+                file,
+                fieldnames=[
+                    "user_id",
+                    "username",
+                    "first_name",
+                    "last_name",
+                    "first_seen",
+                    "last_seen",
+                    "last_step",
+                    "start_count",
+                ],
+            )
+            writer.writeheader()
+            writer.writerows(rows)
+        return file_path
+
+    def export_events_csv(self, export_dir: Path, limit: int = 100000) -> Path:
+        export_dir.mkdir(parents=True, exist_ok=True)
+        file_path = export_dir / f"events_{utc_now().strftime('%Y%m%d_%H%M%S')}.csv"
+
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id, user_id, event_type, step, payload_json, created_at
+                FROM events
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (max(1, min(limit, 500000)),),
+            ).fetchall()
+
+        with file_path.open("w", newline="", encoding="utf-8") as file:
+            writer = csv.DictWriter(
+                file,
+                fieldnames=["id", "user_id", "event_type", "step", "payload_json", "created_at"],
+            )
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(dict(row))
+        return file_path
