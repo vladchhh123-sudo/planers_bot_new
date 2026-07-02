@@ -210,16 +210,23 @@ class AnalyticsService:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def get_user_details(self, user_id: int, event_limit: int = 25) -> dict[str, Any] | None:
+    def get_user_details(self, user_ref: str, event_limit: int = 25) -> dict[str, Any] | None:
+        value = user_ref.strip()
+        query = """
+            SELECT user_id, username, first_name, last_name, language_code,
+                   first_seen, last_seen, last_step, current_step_updated_at, start_count
+            FROM users
+            WHERE user_id = ?
+        """
+        params: tuple[Any, ...]
+        if value.isdigit():
+            params = (int(value),)
+        else:
+            query = query.replace("WHERE user_id = ?", "WHERE LOWER(COALESCE(username, '')) = ?")
+            params = (value.lstrip("@").lower(),)
+
         with self._lock:
-            user_row = self._conn.execute(
-                """
-                SELECT user_id, username, first_name, last_name, language_code,
-                       first_seen, last_seen, last_step, current_step_updated_at, start_count
-                FROM users WHERE user_id = ?
-                """,
-                (user_id,),
-            ).fetchone()
+            user_row = self._conn.execute(query, params).fetchone()
             if not user_row:
                 return None
 
@@ -231,7 +238,7 @@ class AnalyticsService:
                 ORDER BY id DESC
                 LIMIT ?
                 """,
-                (user_id, max(1, min(event_limit, 100))),
+                (user_row["user_id"], max(1, min(event_limit, 100))),
             ).fetchall()
 
         return {
@@ -308,11 +315,26 @@ class AnalyticsService:
 
         return found_users, unresolved
 
+    def get_users_by_step(self, step: str, limit: int = 1000) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(limit, 10000))
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT DISTINCT u.user_id, u.username, u.first_name, u.last_name, u.first_seen, u.last_seen, u.last_step, u.start_count
+                FROM users u
+                JOIN events e ON e.user_id = u.user_id
+                WHERE e.step = ?
+                ORDER BY u.last_seen DESC
+                LIMIT ?
+                """,
+                (step, safe_limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def export_users_csv(self, export_dir: Path) -> Path:
         export_dir.mkdir(parents=True, exist_ok=True)
         file_path = export_dir / f"users_{utc_now().strftime('%Y%m%d_%H%M%S')}.csv"
         rows = self.get_all_users()
-
         with file_path.open("w", newline="", encoding="utf-8") as file:
             writer = csv.DictWriter(
                 file,
@@ -334,7 +356,6 @@ class AnalyticsService:
     def export_events_csv(self, export_dir: Path, limit: int = 100000) -> Path:
         export_dir.mkdir(parents=True, exist_ok=True)
         file_path = export_dir / f"events_{utc_now().strftime('%Y%m%d_%H%M%S')}.csv"
-
         with self._lock:
             rows = self._conn.execute(
                 """

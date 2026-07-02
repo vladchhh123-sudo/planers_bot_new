@@ -22,6 +22,49 @@ _analytics_service: AnalyticsService | None = None
 _config: Config | None = None
 _authorized_users: set[int] = set()
 
+PRODUCT_NAMES = {
+    "habits": "Планер привычек",
+    "tasks": "Планер задач",
+    "finance": "Планер финансов",
+    "goals": "Планер целей",
+    "awareness": "Дневник осознанности",
+}
+
+BUNDLE_NAMES = {
+    "productivity": "Набор «Продуктивность»",
+    "balance": "Набор «Жизнь по балансу»",
+    "ecosystem": "Набор «Экосистема роста»",
+}
+
+COLOR_NAMES = {
+    "white": "белый",
+    "black": "чёрный",
+    "green": "зелёный",
+    "burgundy": "бордовый",
+    "blue": "синий",
+    "pink": "розовый",
+    "beige": "бежевый",
+    "violet": "фиолетовый",
+    "gray": "серый",
+}
+
+SEGMENT_ALIASES = {
+    "start": ("start_screen", "Открыли стартовое сообщение"),
+    "catalog": ("catalog_menu", "Дошли до сообщения со всеми планерами"),
+    "habits": ("product_habits_card", "Дошли до планера привычек"),
+    "tasks": ("product_tasks_card", "Дошли до планера задач"),
+    "finance": ("product_finance_card", "Дошли до планера финансов"),
+    "goals": ("product_goals_card", "Дошли до планера целей"),
+    "awareness": ("product_awareness_card", "Дошли до дневника осознанности"),
+    "offer": ("offer_channel_plus", "Дошли до оффера с каналом"),
+    "single": ("offer_take_single", "Выбрали вариант «Пока что возьму планер»"),
+    "planner_menu": ("offer_single_planner_menu", "Дошли до меню выбора одного планера"),
+    "bundles": ("bundles_landing", "Дошли до наборов"),
+    "productivity": ("bundle_productivity_card", "Открыли набор «Продуктивность»"),
+    "balance": ("bundle_balance_card", "Открыли набор «Жизнь по балансу»"),
+    "ecosystem": ("bundle_ecosystem_card", "Открыли набор «Экосистема роста»"),
+}
+
 
 def setup_admin_panel(analytics_service: AnalyticsService, config: Config) -> None:
     global _analytics_service, _config
@@ -60,7 +103,8 @@ def admin_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="📊 Общая статистика", callback_data="admin:stats")],
             [InlineKeyboardButton(text="🧭 Воронка", callback_data="admin:funnel")],
             [InlineKeyboardButton(text="👥 Последние пользователи", callback_data="admin:users")],
-            [InlineKeyboardButton(text="✉️ Как сделать рассылку", callback_data="admin:send_help")],
+            [InlineKeyboardButton(text="🎯 Сегменты", callback_data="admin:segments")],
+            [InlineKeyboardButton(text="✉️ Рассылка", callback_data="admin:send")],
             [InlineKeyboardButton(text="📁 Выгрузить users CSV", callback_data="admin:export_users")],
             [InlineKeyboardButton(text="📝 Выгрузить events CSV", callback_data="admin:export_events")],
         ]
@@ -73,9 +117,70 @@ def require_services() -> tuple[AnalyticsService, Config]:
     return _analytics_service, _config
 
 
+def humanize_step(step: str | None) -> str:
+    if not step:
+        return "Неизвестный шаг"
+
+    if step == "start_screen":
+        return "Стартовое сообщение"
+    if step == "catalog_menu":
+        return "Сообщение со всеми планерами"
+    if step == "offer_channel_plus":
+        return "Оффер с каналом"
+    if step == "offer_take_single":
+        return "Выбрали «Пока что возьму планер»"
+    if step == "offer_single_planner_menu":
+        return "Меню выбора одного планера после оффера"
+    if step == "bundles_landing":
+        return "Экран с наборами"
+    if step == "pay_channel_offer":
+        return "Переход к оплате канала"
+
+    if step.startswith("product_") and step.endswith("_card"):
+        product_id = step[len("product_") : -len("_card")]
+        return f"Открыли карточку: {PRODUCT_NAMES.get(product_id, product_id)}"
+
+    if step.startswith("colors_product_"):
+        product_id = step[len("colors_product_") :]
+        return f"Дошли до выбора цвета: {PRODUCT_NAMES.get(product_id, product_id)}"
+
+    if step.startswith("after_color_"):
+        rest = step[len("after_color_") :]
+        if "_" in rest:
+            product_id, color_id = rest.rsplit("_", 1)
+            return (
+                f"Выбрали цвет «{COLOR_NAMES.get(color_id, color_id)}» "
+                f"для {PRODUCT_NAMES.get(product_id, product_id)}"
+            )
+
+    if step.startswith("pay_product_"):
+        rest = step[len("pay_product_") :]
+        if "_" in rest:
+            product_id, color_id = rest.rsplit("_", 1)
+            return (
+                f"Дошли до оплаты {PRODUCT_NAMES.get(product_id, product_id)} "
+                f"({COLOR_NAMES.get(color_id, color_id)})"
+            )
+
+    if step.startswith("bundle_") and step.endswith("_card"):
+        bundle_id = step[len("bundle_") : -len("_card")]
+        return f"Открыли карточку: {BUNDLE_NAMES.get(bundle_id, bundle_id)}"
+
+    if step.startswith("pay_bundle_"):
+        rest = step[len("pay_bundle_") :]
+        if "_" in rest:
+            bundle_id, color_id = rest.rsplit("_", 1)
+            return (
+                f"Дошли до оплаты {BUNDLE_NAMES.get(bundle_id, bundle_id)} "
+                f"({COLOR_NAMES.get(color_id, color_id)})"
+            )
+
+    return step
+
+
 def format_summary_text(summary: dict) -> str:
     stops_text = "\n".join(
-        f"• <code>{html.escape(step)}</code> — <b>{count}</b>"
+        f"• {html.escape(humanize_step(step))} — <b>{count}</b>"
         for step, count in summary["top_stops"]
     ) or "—"
 
@@ -91,19 +196,19 @@ def format_summary_text(summary: dict) -> str:
 
 
 def format_funnel_text(funnel: list[tuple[str, int]]) -> str:
-    lines = ["<b>🧭 Воронка / шаги</b>"]
+    lines = ["<b>🧭 Воронка по шагам</b>"]
     for step, count in funnel[:100]:
-        lines.append(f"• <code>{html.escape(step)}</code> — <b>{count}</b>")
+        lines.append(f"• {html.escape(humanize_step(step))} — <b>{count}</b>")
     return "\n".join(lines)
 
 
 def format_user_line(user: dict) -> str:
     first_name = html.escape(user.get("first_name") or "—")
     username = html.escape(user.get("username") or "—")
-    last_step = html.escape(user.get("last_step") or "—")
+    last_step = html.escape(humanize_step(user.get("last_step")))
     return (
         f"<b>{first_name}</b> | ID: <code>{user['user_id']}</code> | @{username}\n"
-        f"Шаг: <code>{last_step}</code>\n"
+        f"Последний шаг: {last_step}\n"
         f"Последняя активность: {html.escape(user.get('last_seen') or '—')}"
     )
 
@@ -125,19 +230,34 @@ def chunk_text(blocks: list[str], limit: int = 3500) -> list[str]:
 
 def mailing_help_text() -> str:
     return (
-        "<b>Рассылка выбранным пользователям</b>\n\n"
-        "Формат команды:\n"
+        "<b>✉️ Рассылка выбранным пользователям</b>\n\n"
+        "Команда по ID и username:\n"
         "<code>/send 123456789,@username1,@username2 | Текст сообщения</code>\n\n"
-        "Пример:\n"
-        "<code>/send 6981057562,@intlunity | Привет! Это тестовая рассылка.</code>\n\n"
-        "Можно указывать:\n"
-        "• Telegram ID\n"
-        "• username\n\n"
-        "Важно:\n"
-        "• бот может писать только тем, кто уже запускал бота\n"
-        "• сообщение отправляется как обычный текст\n"
-        "• если пользователь заблокировал бота, доставка не сработает"
+        "Команда по сегменту:\n"
+        "<code>/send_segment finance | Текст сообщения</code>\n\n"
+        "Примеры сегментов:\n"
+        "• <code>catalog</code> — дошли до всех планеров\n"
+        "• <code>finance</code> — дошли до планера финансов\n"
+        "• <code>tasks</code> — дошли до планера задач\n"
+        "• <code>habits</code> — дошли до планера привычек\n"
+        "• <code>goals</code> — дошли до планера целей\n"
+        "• <code>awareness</code> — дошли до дневника осознанности\n"
+        "• <code>offer</code> — дошли до оффера\n"
+        "• <code>bundles</code> — дошли до наборов"
     )
+
+
+def segments_help_text() -> str:
+    lines = ["<b>🎯 Сегменты пользователей по воронке</b>"]
+    for alias, (_, description) in SEGMENT_ALIASES.items():
+        lines.append(f"• <code>{alias}</code> — {html.escape(description)}")
+    lines.append("")
+    lines.append("Посмотреть пользователей сегмента:")
+    lines.append("<code>/segment finance</code>")
+    lines.append("")
+    lines.append("Сделать рассылку сегменту:")
+    lines.append("<code>/send_segment finance | Текст сообщения</code>")
+    return "\n".join(lines)
 
 
 def parse_send_command(text: str) -> tuple[list[str], str] | None:
@@ -163,10 +283,65 @@ def parse_send_command(text: str) -> tuple[list[str], str] | None:
     return targets, raw_message
 
 
+def parse_segment_command(text: str) -> tuple[str, str] | None:
+    parts = text.split(maxsplit=1)
+    if len(parts) < 2:
+        return None
+
+    body = parts[1].strip()
+    if "|" not in body:
+        return None
+
+    raw_alias, raw_message = body.split("|", maxsplit=1)
+    alias = raw_alias.strip().lower()
+    outgoing_text = raw_message.strip()
+    if not alias or not outgoing_text:
+        return None
+    return alias, outgoing_text
+
+
+def get_segment(alias: str) -> tuple[str, str] | None:
+    return SEGMENT_ALIASES.get(alias.lower())
+
+
+async def send_message_to_users(message: Message, users: list[dict], outgoing_text: str, unresolved: list[str] | None = None) -> None:
+    sent_count = 0
+    failed: list[str] = []
+
+    for user in users:
+        try:
+            await message.bot.send_message(chat_id=user["user_id"], text=outgoing_text)
+            sent_count += 1
+        except Exception as exc:
+            username = user.get("username") or "—"
+            failed.append(f"{user['user_id']} (@{username}): {exc}")
+
+    report_lines = [
+        "<b>Результат рассылки</b>",
+        f"Найдено получателей: <b>{len(users)}</b>",
+        f"Успешно отправлено: <b>{sent_count}</b>",
+    ]
+
+    if unresolved:
+        report_lines.append("")
+        report_lines.append("<b>Не найдены в базе:</b>")
+        for item in unresolved:
+            report_lines.append(f"• <code>{html.escape(item)}</code>")
+
+    if failed:
+        report_lines.append("")
+        report_lines.append("<b>Ошибки доставки:</b>")
+        for item in failed[:20]:
+            report_lines.append(f"• {html.escape(item)}")
+        if len(failed) > 20:
+            report_lines.append(f"• И ещё {len(failed) - 20} ошибок")
+
+    await message.answer("\n".join(report_lines), reply_markup=admin_keyboard())
+
+
 @router.message(Command("admin"))
 async def command_admin(message: Message) -> None:
-    analytics_service, config = require_services()
-    _ = analytics_service
+    _, config = require_services()
 
     if not has_password():
         await message.answer("ADMIN_PASSWORD не настроен в переменных окружения.")
@@ -181,8 +356,10 @@ async def command_admin(message: Message) -> None:
             "/stats — общая статистика\n"
             "/funnel — воронка\n"
             "/users — последние пользователи\n"
-            "/user ID — карточка пользователя\n"
-            "/send получатели | текст — отправить сообщение выбранным пользователям\n"
+            "/user ID_ИЛИ_@username — карточка пользователя\n"
+            "/segment alias — список пользователей по шагу\n"
+            "/send получатели | текст — рассылка по ID/username\n"
+            "/send_segment alias | текст — рассылка по сегменту\n"
             "/export_users — CSV с пользователями\n"
             "/export_events — CSV с событиями\n"
             "/admin_logout — выйти из админки",
@@ -206,8 +383,10 @@ async def command_admin(message: Message) -> None:
         "/stats\n"
         "/funnel\n"
         "/users\n"
-        "/user ID\n"
+        "/user ID_ИЛИ_@username\n"
+        "/segment alias\n"
         "/send получатели | текст\n"
+        "/send_segment alias | текст\n"
         "/export_users\n"
         "/export_events\n"
         "/admin_logout",
@@ -226,10 +405,7 @@ async def command_stats(message: Message) -> None:
     if not await ensure_admin_message(message):
         return
     analytics_service, _ = require_services()
-    await message.answer(
-        format_summary_text(analytics_service.get_summary()),
-        reply_markup=admin_keyboard(),
-    )
+    await message.answer(format_summary_text(analytics_service.get_summary()), reply_markup=admin_keyboard())
 
 
 @router.message(Command("funnel"))
@@ -273,12 +449,11 @@ async def command_user(message: Message) -> None:
     analytics_service, _ = require_services()
 
     parts = (message.text or "").split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].strip().isdigit():
-        await message.answer("Используй так: <code>/user 123456789</code>")
+    if len(parts) < 2:
+        await message.answer("Используй так: <code>/user 123456789</code> или <code>/user @username</code>")
         return
 
-    user_id = int(parts[1].strip())
-    details = analytics_service.get_user_details(user_id)
+    details = analytics_service.get_user_details(parts[1].strip())
     if not details:
         await message.answer("Такой пользователь не найден.")
         return
@@ -292,7 +467,7 @@ async def command_user(message: Message) -> None:
         f"Имя: {html.escape(user.get('first_name') or '—')}",
         f"Первый визит: {html.escape(user.get('first_seen') or '—')}",
         f"Последний визит: {html.escape(user.get('last_seen') or '—')}",
-        f"Последний шаг: <code>{html.escape(user.get('last_step') or '—')}</code>",
+        f"Последний шаг: {html.escape(humanize_step(user.get('last_step')))}",
         f"Кол-во /start: <b>{user.get('start_count') or 0}</b>",
         "",
         "<b>Последние события:</b>",
@@ -301,13 +476,42 @@ async def command_user(message: Message) -> None:
         lines.append(
             f"• {html.escape(event['created_at'])} | "
             f"<code>{html.escape(event['event_type'])}</code> | "
-            f"<code>{html.escape(event.get('step') or '—')}</code>"
+            f"{html.escape(humanize_step(event.get('step')))}"
         )
 
     text = "\n".join(lines)
     if len(text) > 3900:
         text = text[:3900] + "\n…"
     await message.answer(text)
+
+
+@router.message(Command("segment"))
+async def command_segment(message: Message) -> None:
+    if not await ensure_admin_message(message):
+        return
+    analytics_service, _ = require_services()
+
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer(segments_help_text(), reply_markup=admin_keyboard())
+        return
+
+    alias = parts[1].strip().lower()
+    segment = get_segment(alias)
+    if segment is None:
+        await message.answer("Неизвестный сегмент.\n\n" + segments_help_text(), reply_markup=admin_keyboard())
+        return
+
+    step, description = segment
+    users = analytics_service.get_users_by_step(step, limit=500)
+    if not users:
+        await message.answer(f"По сегменту «{html.escape(alias)}» пользователей пока нет.", reply_markup=admin_keyboard())
+        return
+
+    blocks = [f"<b>{html.escape(description)}</b>\nВсего: <b>{len(users)}</b>"]
+    blocks.extend(format_user_line(user) for user in users)
+    for chunk in chunk_text(blocks):
+        await message.answer(chunk)
 
 
 @router.message(Command("send"))
@@ -333,44 +537,40 @@ async def command_send(message: Message) -> None:
         )
         return
 
-    sent_count = 0
-    failed: list[str] = []
+    await send_message_to_users(message, users, outgoing_text, unresolved=unresolved)
 
-    safe_text = html.escape(outgoing_text)
 
-    for user in users:
-        try:
-            await message.bot.send_message(
-                chat_id=user["user_id"],
-                text=safe_text,
-            )
-            sent_count += 1
-        except Exception as exc:
-            username = user.get("username") or "—"
-            failed.append(f"{user['user_id']} (@{username}): {exc}")
+@router.message(Command("send_segment"))
+async def command_send_segment(message: Message) -> None:
+    if not await ensure_admin_message(message):
+        return
 
-    report_lines = [
-        "<b>Результат рассылки</b>",
-        f"Запрошено получателей: <b>{len(targets)}</b>",
-        f"Найдено в базе: <b>{len(users)}</b>",
-        f"Успешно отправлено: <b>{sent_count}</b>",
-    ]
+    parsed = parse_segment_command(message.text or "")
+    if parsed is None:
+        await message.answer(mailing_help_text(), reply_markup=admin_keyboard())
+        return
 
-    if unresolved:
-        report_lines.append("")
-        report_lines.append("<b>Не найдены в базе:</b>")
-        for item in unresolved:
-            report_lines.append(f"• <code>{html.escape(item)}</code>")
+    alias, outgoing_text = parsed
+    segment = get_segment(alias)
+    if segment is None:
+        await message.answer("Неизвестный сегмент.\n\n" + segments_help_text(), reply_markup=admin_keyboard())
+        return
 
-    if failed:
-        report_lines.append("")
-        report_lines.append("<b>Ошибки доставки:</b>")
-        for item in failed[:20]:
-            report_lines.append(f"• {html.escape(item)}")
-        if len(failed) > 20:
-            report_lines.append(f"• И ещё {len(failed) - 20} ошибок")
+    step, description = segment
+    analytics_service, _ = require_services()
+    users = analytics_service.get_users_by_step(step, limit=5000)
+    if not users:
+        await message.answer(
+            f"По сегменту «{html.escape(alias)}» пользователей пока нет.",
+            reply_markup=admin_keyboard(),
+        )
+        return
 
-    await message.answer("\n".join(report_lines), reply_markup=admin_keyboard())
+    await message.answer(
+        f"Начинаю рассылку по сегменту: <b>{html.escape(description)}</b>\n"
+        f"Найдено пользователей: <b>{len(users)}</b>"
+    )
+    await send_message_to_users(message, users, outgoing_text)
 
 
 @router.message(Command("export_users"))
@@ -397,10 +597,7 @@ async def callback_admin_stats(callback: CallbackQuery) -> None:
         return
     analytics_service, _ = require_services()
     await callback.answer()
-    await callback.message.answer(
-        format_summary_text(analytics_service.get_summary()),
-        reply_markup=admin_keyboard(),
-    )
+    await callback.message.answer(format_summary_text(analytics_service.get_summary()), reply_markup=admin_keyboard())
 
 
 @router.callback_query(lambda c: c.data == "admin:funnel")
@@ -433,8 +630,16 @@ async def callback_admin_users(callback: CallbackQuery) -> None:
         await callback.message.answer(chunk)
 
 
-@router.callback_query(lambda c: c.data == "admin:send_help")
-async def callback_admin_send_help(callback: CallbackQuery) -> None:
+@router.callback_query(lambda c: c.data == "admin:segments")
+async def callback_admin_segments(callback: CallbackQuery) -> None:
+    if not await ensure_admin_callback(callback):
+        return
+    await callback.answer()
+    await callback.message.answer(segments_help_text(), reply_markup=admin_keyboard())
+
+
+@router.callback_query(lambda c: c.data == "admin:send")
+async def callback_admin_send(callback: CallbackQuery) -> None:
     if not await ensure_admin_callback(callback):
         return
     await callback.answer()
