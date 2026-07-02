@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import html
+import json
 import re
+from pathlib import Path
+from typing import Any
 
-from aiogram import Router
+from aiogram import Bot, Router
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
@@ -21,6 +24,8 @@ router = Router()
 _analytics_service: AnalyticsService | None = None
 _config: Config | None = None
 _authorized_users: set[int] = set()
+_notify_enabled_users: set[int] = set()
+_notify_state_file: Path | None = None
 
 PRODUCT_NAMES = {
     "habits": "Планер привычек",
@@ -67,9 +72,35 @@ SEGMENT_ALIASES = {
 
 
 def setup_admin_panel(analytics_service: AnalyticsService, config: Config) -> None:
-    global _analytics_service, _config
+    global _analytics_service, _config, _notify_state_file, _notify_enabled_users
     _analytics_service = analytics_service
     _config = config
+    _notify_state_file = config.data_dir / "admin_notify.json"
+    _notify_enabled_users = _load_notify_users()
+
+
+def _load_notify_users() -> set[int]:
+    if _notify_state_file is None or not _notify_state_file.exists():
+        return set()
+
+    try:
+        data = json.loads(_notify_state_file.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return {int(item) for item in data if str(item).isdigit()}
+    except Exception:
+        return set()
+
+    return set()
+
+
+def _save_notify_users() -> None:
+    if _notify_state_file is None:
+        return
+    _notify_state_file.parent.mkdir(parents=True, exist_ok=True)
+    _notify_state_file.write_text(
+        json.dumps(sorted(_notify_enabled_users), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def is_admin(user_id: int) -> bool:
@@ -78,6 +109,35 @@ def is_admin(user_id: int) -> bool:
 
 def has_password() -> bool:
     return _config is not None and bool(_config.admin_password)
+
+
+def notifications_enabled_for(user_id: int) -> bool:
+    return user_id in _notify_enabled_users
+
+
+async def notify_admins_about_start(bot: Bot, user: Any) -> None:
+    if not _notify_enabled_users:
+        return
+
+    user_id = int(user.id)
+    username = getattr(user, "username", None)
+    first_name = getattr(user, "first_name", None) or "Без имени"
+
+    username_text = f"@{html.escape(username)}" if username else "без username"
+    first_name_text = html.escape(first_name)
+
+    text = (
+        "<b>🔔 Новый вход в бота</b>\n\n"
+        f"Имя: <b>{first_name_text}</b>\n"
+        f"Username: {username_text}\n"
+        f"ID: <code>{user_id}</code>"
+    )
+
+    for admin_id in list(_notify_enabled_users):
+        try:
+            await bot.send_message(chat_id=admin_id, text=text)
+        except Exception:
+            continue
 
 
 async def ensure_admin_message(message: Message) -> bool:
@@ -105,6 +165,10 @@ def admin_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="👥 Последние пользователи", callback_data="admin:users")],
             [InlineKeyboardButton(text="🎯 Сегменты", callback_data="admin:segments")],
             [InlineKeyboardButton(text="✉️ Рассылка", callback_data="admin:send")],
+            [
+                InlineKeyboardButton(text="🔔 Включить уведомления", callback_data="admin:notify_on"),
+                InlineKeyboardButton(text="🔕 Выключить уведомления", callback_data="admin:notify_off"),
+            ],
             [InlineKeyboardButton(text="📁 Выгрузить users CSV", callback_data="admin:export_users")],
             [InlineKeyboardButton(text="📝 Выгрузить events CSV", callback_data="admin:export_events")],
         ]
@@ -304,7 +368,12 @@ def get_segment(alias: str) -> tuple[str, str] | None:
     return SEGMENT_ALIASES.get(alias.lower())
 
 
-async def send_message_to_users(message: Message, users: list[dict], outgoing_text: str, unresolved: list[str] | None = None) -> None:
+async def send_message_to_users(
+    message: Message,
+    users: list[dict],
+    outgoing_text: str,
+    unresolved: list[str] | None = None,
+) -> None:
     sent_count = 0
     failed: list[str] = []
 
@@ -360,6 +429,8 @@ async def command_admin(message: Message) -> None:
             "/segment alias — список пользователей по шагу\n"
             "/send получатели | текст — рассылка по ID/username\n"
             "/send_segment alias | текст — рассылка по сегменту\n"
+            "/notify_on — включить уведомления о новых входах\n"
+            "/notify_off — выключить уведомления о новых входах\n"
             "/export_users — CSV с пользователями\n"
             "/export_events — CSV с событиями\n"
             "/admin_logout — выйти из админки",
@@ -387,6 +458,8 @@ async def command_admin(message: Message) -> None:
         "/segment alias\n"
         "/send получатели | текст\n"
         "/send_segment alias | текст\n"
+        "/notify_on\n"
+        "/notify_off\n"
         "/export_users\n"
         "/export_events\n"
         "/admin_logout",
@@ -398,6 +471,32 @@ async def command_admin(message: Message) -> None:
 async def command_admin_logout(message: Message) -> None:
     _authorized_users.discard(message.from_user.id)
     await message.answer("Ты вышел из админ-панели.")
+
+
+@router.message(Command("notify_on"))
+async def command_notify_on(message: Message) -> None:
+    if not await ensure_admin_message(message):
+        return
+
+    _notify_enabled_users.add(message.from_user.id)
+    _save_notify_users()
+    await message.answer(
+        "✅ Уведомления о новых входах в бота включены.",
+        reply_markup=admin_keyboard(),
+    )
+
+
+@router.message(Command("notify_off"))
+async def command_notify_off(message: Message) -> None:
+    if not await ensure_admin_message(message):
+        return
+
+    _notify_enabled_users.discard(message.from_user.id)
+    _save_notify_users()
+    await message.answer(
+        "🔕 Уведомления о новых входах в бота выключены.",
+        reply_markup=admin_keyboard(),
+    )
 
 
 @router.message(Command("stats"))
@@ -597,7 +696,10 @@ async def callback_admin_stats(callback: CallbackQuery) -> None:
         return
     analytics_service, _ = require_services()
     await callback.answer()
-    await callback.message.answer(format_summary_text(analytics_service.get_summary()), reply_markup=admin_keyboard())
+    await callback.message.answer(
+        format_summary_text(analytics_service.get_summary()),
+        reply_markup=admin_keyboard(),
+    )
 
 
 @router.callback_query(lambda c: c.data == "admin:funnel")
@@ -644,6 +746,34 @@ async def callback_admin_send(callback: CallbackQuery) -> None:
         return
     await callback.answer()
     await callback.message.answer(mailing_help_text(), reply_markup=admin_keyboard())
+
+
+@router.callback_query(lambda c: c.data == "admin:notify_on")
+async def callback_admin_notify_on(callback: CallbackQuery) -> None:
+    if not await ensure_admin_callback(callback):
+        return
+
+    _notify_enabled_users.add(callback.from_user.id)
+    _save_notify_users()
+    await callback.answer("Уведомления включены")
+    await callback.message.answer(
+        "✅ Уведомления о новых входах в бота включены.",
+        reply_markup=admin_keyboard(),
+    )
+
+
+@router.callback_query(lambda c: c.data == "admin:notify_off")
+async def callback_admin_notify_off(callback: CallbackQuery) -> None:
+    if not await ensure_admin_callback(callback):
+        return
+
+    _notify_enabled_users.discard(callback.from_user.id)
+    _save_notify_users()
+    await callback.answer("Уведомления выключены")
+    await callback.message.answer(
+        "🔕 Уведомления о новых входах в бота выключены.",
+        reply_markup=admin_keyboard(),
+    )
 
 
 @router.callback_query(lambda c: c.data == "admin:export_users")

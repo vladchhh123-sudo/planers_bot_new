@@ -10,7 +10,7 @@ from aiogram.enums import ChatAction, ParseMode
 from aiogram.filters import Command
 from aiogram.types import BotCommand, CallbackQuery, Message
 
-from .admin_panel import router as admin_router, setup_admin_panel
+from .admin_panel import notify_admins_about_start, router as admin_router, setup_admin_panel
 from .analytics import AnalyticsService
 from .catalog import (
     BUNDLES,
@@ -193,6 +193,7 @@ async def command_start(message: Message) -> None:
     name = user_first_name(message.from_user)
     text = render_text(START_TEXT, name=name)
     await message.answer(text, reply_markup=start_keyboard())
+    await notify_admins_about_start(message.bot, message.from_user)
 
 
 @router.message(Command("menu"))
@@ -376,4 +377,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-    
