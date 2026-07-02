@@ -15,7 +15,7 @@ class Config:
     data_dir: Path
     analytics_db_path: Path
     log_level: str
-    admin_ids: tuple[int, ...]
+    admin_password: str | None
 
     @classmethod
     def load(cls) -> "Config":
@@ -40,12 +40,7 @@ class Config:
             os.getenv("ANALYTICS_DB_PATH", str(data_dir / "analytics.sqlite3"))
         ).resolve()
 
-        admin_ids_raw = os.getenv("ADMIN_IDS", "")
-        admin_ids = tuple(
-            int(part.strip())
-            for part in admin_ids_raw.split(",")
-            if part.strip().isdigit()
-        )
+        admin_password = os.getenv("ADMIN_PASSWORD") or None
 
         return cls(
             bot_token=bot_token,
@@ -54,5 +49,5 @@ class Config:
             data_dir=data_dir,
             analytics_db_path=analytics_db_path,
             log_level=log_level,
-            admin_ids=admin_ids,
+            admin_password=admin_password,
         )

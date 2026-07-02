@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import html
 
-from aiogram import F, Router
+from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
@@ -19,6 +19,7 @@ router = Router()
 
 _analytics_service: AnalyticsService | None = None
 _config: Config | None = None
+_authorized_users: set[int] = set()
 
 
 def setup_admin_panel(analytics_service: AnalyticsService, config: Config) -> None:
@@ -28,19 +29,26 @@ def setup_admin_panel(analytics_service: AnalyticsService, config: Config) -> No
 
 
 def is_admin(user_id: int) -> bool:
-    return _config is not None and user_id in _config.admin_ids
+    return user_id in _authorized_users
+
+
+def has_password() -> bool:
+    return _config is not None and bool(_config.admin_password)
 
 
 async def ensure_admin_message(message: Message) -> bool:
     if not is_admin(message.from_user.id):
-        await message.answer("У тебя нет доступа к админ-панели.")
+        await message.answer(
+            "У тебя нет доступа к админ-панели.\n\n"
+            "Войди так: <code>/admin ТВОЙ_ПАРОЛЬ</code>"
+        )
         return False
     return True
 
 
 async def ensure_admin_callback(callback: CallbackQuery) -> bool:
     if not is_admin(callback.from_user.id):
-        await callback.answer("Нет доступа", show_alert=True)
+        await callback.answer("Сначала войди через /admin пароль", show_alert=True)
         return False
     return True
 
@@ -115,20 +123,58 @@ def chunk_text(blocks: list[str], limit: int = 3500) -> list[str]:
 
 @router.message(Command("admin"))
 async def command_admin(message: Message) -> None:
-    if not await ensure_admin_message(message):
+    analytics_service, config = require_services()
+    _ = analytics_service
+
+    if not has_password():
+        await message.answer("ADMIN_PASSWORD не настроен в переменных окружения.")
         return
 
+    parts = (message.text or "").split(maxsplit=1)
+
+    if is_admin(message.from_user.id):
+        await message.answer(
+            "<b>Админ-панель ПЛАНИРУЙ</b>\n\n"
+            "Доступные команды:\n"
+            "/stats — общая статистика\n"
+            "/funnel — воронка\n"
+            "/users — последние пользователи\n"
+            "/user ID — карточка пользователя\n"
+            "/export_users — CSV с пользователями\n"
+            "/export_events — CSV с событиями\n"
+            "/admin_logout — выйти из админки",
+            reply_markup=admin_keyboard(),
+        )
+        return
+
+    if len(parts) < 2:
+        await message.answer("Войди так: <code>/admin ТВОЙ_ПАРОЛЬ</code>")
+        return
+
+    password = parts[1].strip()
+    if password != config.admin_password:
+        await message.answer("Неверный пароль.")
+        return
+
+    _authorized_users.add(message.from_user.id)
     await message.answer(
-        "<b>Админ-панель ПЛАНИРУЙ</b>\n\n"
-        "Доступные команды:\n"
-        "/stats — общая статистика\n"
-        "/funnel — воронка\n"
-        "/users — последние пользователи\n"
-        "/user ID — карточка пользователя\n"
-        "/export_users — CSV с пользователями\n"
-        "/export_events — CSV с событиями",
+        "✅ Доступ к админ-панели открыт.\n\n"
+        "Теперь доступны команды:\n"
+        "/stats\n"
+        "/funnel\n"
+        "/users\n"
+        "/user ID\n"
+        "/export_users\n"
+        "/export_events\n"
+        "/admin_logout",
         reply_markup=admin_keyboard(),
     )
+
+
+@router.message(Command("admin_logout"))
+async def command_admin_logout(message: Message) -> None:
+    _authorized_users.discard(message.from_user.id)
+    await message.answer("Ты вышел из админ-панели.")
 
 
 @router.message(Command("stats"))
@@ -136,7 +182,10 @@ async def command_stats(message: Message) -> None:
     if not await ensure_admin_message(message):
         return
     analytics_service, _ = require_services()
-    await message.answer(format_summary_text(analytics_service.get_summary()), reply_markup=admin_keyboard())
+    await message.answer(
+        format_summary_text(analytics_service.get_summary()),
+        reply_markup=admin_keyboard(),
+    )
 
 
 @router.message(Command("funnel"))
@@ -235,16 +284,19 @@ async def command_export_events(message: Message) -> None:
     await message.answer_document(FSInputFile(export_path), caption="CSV с событиями")
 
 
-@router.callback_query(F.data == "admin:stats")
+@router.callback_query(lambda c: c.data == "admin:stats")
 async def callback_admin_stats(callback: CallbackQuery) -> None:
     if not await ensure_admin_callback(callback):
         return
     analytics_service, _ = require_services()
     await callback.answer()
-    await callback.message.answer(format_summary_text(analytics_service.get_summary()), reply_markup=admin_keyboard())
+    await callback.message.answer(
+        format_summary_text(analytics_service.get_summary()),
+        reply_markup=admin_keyboard(),
+    )
 
 
-@router.callback_query(F.data == "admin:funnel")
+@router.callback_query(lambda c: c.data == "admin:funnel")
 async def callback_admin_funnel(callback: CallbackQuery) -> None:
     if not await ensure_admin_callback(callback):
         return
@@ -257,7 +309,7 @@ async def callback_admin_funnel(callback: CallbackQuery) -> None:
     await callback.message.answer(format_funnel_text(funnel), reply_markup=admin_keyboard())
 
 
-@router.callback_query(F.data == "admin:users")
+@router.callback_query(lambda c: c.data == "admin:users")
 async def callback_admin_users(callback: CallbackQuery) -> None:
     if not await ensure_admin_callback(callback):
         return
@@ -274,7 +326,7 @@ async def callback_admin_users(callback: CallbackQuery) -> None:
         await callback.message.answer(chunk)
 
 
-@router.callback_query(F.data == "admin:export_users")
+@router.callback_query(lambda c: c.data == "admin:export_users")
 async def callback_admin_export_users(callback: CallbackQuery) -> None:
     if not await ensure_admin_callback(callback):
         return
@@ -284,7 +336,7 @@ async def callback_admin_export_users(callback: CallbackQuery) -> None:
     await callback.message.answer_document(FSInputFile(export_path), caption="CSV с пользователями")
 
 
-@router.callback_query(F.data == "admin:export_events")
+@router.callback_query(lambda c: c.data == "admin:export_events")
 async def callback_admin_export_events(callback: CallbackQuery) -> None:
     if not await ensure_admin_callback(callback):
         return
