@@ -8,6 +8,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+MOSCOW_TZ = timezone(timedelta(hours=3))
+
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -15,6 +17,20 @@ def utc_now() -> datetime:
 
 def utc_now_iso() -> str:
     return utc_now().isoformat(timespec="seconds")
+
+
+def to_moscow_display(value: str | None) -> str:
+    if not value:
+        return "—"
+
+    try:
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        dt_msk = dt.astimezone(MOSCOW_TZ)
+        return dt_msk.strftime("%d.%m.%Y %H:%M:%S")
+    except Exception:
+        return value
 
 
 class AnalyticsService:
@@ -136,14 +152,15 @@ class AnalyticsService:
 
     def get_summary(self) -> dict[str, Any]:
         now = utc_now()
-        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start = now.astimezone(MOSCOW_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start_utc = today_start.astimezone(timezone.utc)
         active_since = now - timedelta(hours=24)
 
         with self._lock:
             total_users = self._conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
             users_today = self._conn.execute(
                 "SELECT COUNT(*) FROM users WHERE first_seen >= ?",
-                (today_start.isoformat(timespec="seconds"),),
+                (today_start_utc.isoformat(timespec="seconds"),),
             ).fetchone()[0]
             active_24h = self._conn.execute(
                 "SELECT COUNT(*) FROM users WHERE last_seen >= ?",
@@ -197,7 +214,12 @@ class AnalyticsService:
                 """,
                 (safe_limit,),
             ).fetchall()
-        return [dict(row) for row in rows]
+
+        users = [dict(row) for row in rows]
+        for user in users:
+            user["first_seen"] = to_moscow_display(user.get("first_seen"))
+            user["last_seen"] = to_moscow_display(user.get("last_seen"))
+        return users
 
     def get_all_users(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -208,7 +230,12 @@ class AnalyticsService:
                 ORDER BY last_seen DESC
                 """
             ).fetchall()
-        return [dict(row) for row in rows]
+
+        users = [dict(row) for row in rows]
+        for user in users:
+            user["first_seen"] = to_moscow_display(user.get("first_seen"))
+            user["last_seen"] = to_moscow_display(user.get("last_seen"))
+        return users
 
     def get_user_details(self, user_ref: str, event_limit: int = 25) -> dict[str, Any] | None:
         value = user_ref.strip()
@@ -241,9 +268,18 @@ class AnalyticsService:
                 (user_row["user_id"], max(1, min(event_limit, 100))),
             ).fetchall()
 
+        user_data = dict(user_row)
+        user_data["first_seen"] = to_moscow_display(user_data.get("first_seen"))
+        user_data["last_seen"] = to_moscow_display(user_data.get("last_seen"))
+        user_data["current_step_updated_at"] = to_moscow_display(user_data.get("current_step_updated_at"))
+
+        events_data = [dict(row) for row in event_rows]
+        for event in events_data:
+            event["created_at"] = to_moscow_display(event.get("created_at"))
+
         return {
-            "user": dict(user_row),
-            "events": [dict(row) for row in event_rows],
+            "user": user_data,
+            "events": events_data,
         }
 
     def find_users_by_refs(self, refs: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
@@ -329,7 +365,12 @@ class AnalyticsService:
                 """,
                 (step, safe_limit),
             ).fetchall()
-        return [dict(row) for row in rows]
+
+        users = [dict(row) for row in rows]
+        for user in users:
+            user["first_seen"] = to_moscow_display(user.get("first_seen"))
+            user["last_seen"] = to_moscow_display(user.get("last_seen"))
+        return users
 
     def export_users_csv(self, export_dir: Path) -> Path:
         export_dir.mkdir(parents=True, exist_ok=True)
@@ -367,12 +408,15 @@ class AnalyticsService:
                 (max(1, min(limit, 500000)),),
             ).fetchall()
 
+        events = [dict(row) for row in rows]
+        for event in events:
+            event["created_at"] = to_moscow_display(event.get("created_at"))
+
         with file_path.open("w", newline="", encoding="utf-8") as file:
             writer = csv.DictWriter(
                 file,
                 fieldnames=["id", "user_id", "event_type", "step", "payload_json", "created_at"],
             )
             writer.writeheader()
-            for row in rows:
-                writer.writerow(dict(row))
+            writer.writerows(events)
         return file_path
