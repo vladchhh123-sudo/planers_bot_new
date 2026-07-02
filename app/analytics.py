@@ -239,6 +239,75 @@ class AnalyticsService:
             "events": [dict(row) for row in event_rows],
         }
 
+    def find_users_by_refs(self, refs: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
+        normalized_refs: list[str] = []
+        id_refs: list[int] = []
+        username_refs: list[str] = []
+
+        for ref in refs:
+            token = ref.strip()
+            if not token:
+                continue
+            normalized_refs.append(token)
+            if token.isdigit():
+                id_refs.append(int(token))
+            else:
+                username_refs.append(token.lstrip("@").lower())
+
+        if not normalized_refs:
+            return [], []
+
+        clauses: list[str] = []
+        params: list[Any] = []
+
+        if id_refs:
+            placeholders = ",".join("?" for _ in id_refs)
+            clauses.append(f"user_id IN ({placeholders})")
+            params.extend(id_refs)
+
+        if username_refs:
+            placeholders = ",".join("?" for _ in username_refs)
+            clauses.append(f"LOWER(COALESCE(username, '')) IN ({placeholders})")
+            params.extend(username_refs)
+
+        query = f'''
+            SELECT user_id, username, first_name, last_name, first_seen, last_seen, last_step, start_count
+            FROM users
+            WHERE {" OR ".join(clauses)}
+        '''
+
+        with self._lock:
+            rows = self._conn.execute(query, params).fetchall()
+
+        users = [dict(row) for row in rows]
+        by_id = {str(user["user_id"]): user for user in users}
+        by_username = {
+            (user["username"] or "").lower(): user
+            for user in users
+            if user.get("username")
+        }
+
+        found_users: list[dict[str, Any]] = []
+        unresolved: list[str] = []
+        seen_user_ids: set[int] = set()
+
+        for ref in normalized_refs:
+            user: dict[str, Any] | None = None
+            if ref.isdigit():
+                user = by_id.get(ref)
+            else:
+                user = by_username.get(ref.lstrip("@").lower())
+
+            if user is None:
+                unresolved.append(ref)
+                continue
+
+            if user["user_id"] not in seen_user_ids:
+                found_users.append(user)
+                seen_user_ids.add(user["user_id"])
+
+        return found_users, unresolved
+
     def export_users_csv(self, export_dir: Path) -> Path:
         export_dir.mkdir(parents=True, exist_ok=True)
         file_path = export_dir / f"users_{utc_now().strftime('%Y%m%d_%H%M%S')}.csv"

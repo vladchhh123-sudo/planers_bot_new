@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import re
 
 from aiogram import Router
 from aiogram.filters import Command
@@ -59,6 +60,7 @@ def admin_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="📊 Общая статистика", callback_data="admin:stats")],
             [InlineKeyboardButton(text="🧭 Воронка", callback_data="admin:funnel")],
             [InlineKeyboardButton(text="👥 Последние пользователи", callback_data="admin:users")],
+            [InlineKeyboardButton(text="✉️ Как сделать рассылку", callback_data="admin:send_help")],
             [InlineKeyboardButton(text="📁 Выгрузить users CSV", callback_data="admin:export_users")],
             [InlineKeyboardButton(text="📝 Выгрузить events CSV", callback_data="admin:export_events")],
         ]
@@ -121,6 +123,46 @@ def chunk_text(blocks: list[str], limit: int = 3500) -> list[str]:
     return chunks
 
 
+def mailing_help_text() -> str:
+    return (
+        "<b>Рассылка выбранным пользователям</b>\n\n"
+        "Формат команды:\n"
+        "<code>/send 123456789,@username1,@username2 | Текст сообщения</code>\n\n"
+        "Пример:\n"
+        "<code>/send 6981057562,@intlunity | Привет! Это тестовая рассылка.</code>\n\n"
+        "Можно указывать:\n"
+        "• Telegram ID\n"
+        "• username\n\n"
+        "Важно:\n"
+        "• бот может писать только тем, кто уже запускал бота\n"
+        "• сообщение отправляется как обычный текст\n"
+        "• если пользователь заблокировал бота, доставка не сработает"
+    )
+
+
+def parse_send_command(text: str) -> tuple[list[str], str] | None:
+    parts = text.split(maxsplit=1)
+    if len(parts) < 2:
+        return None
+
+    body = parts[1].strip()
+    if "|" not in body:
+        return None
+
+    raw_targets, raw_message = body.split("|", maxsplit=1)
+    raw_targets = raw_targets.strip()
+    raw_message = raw_message.strip()
+
+    if not raw_targets or not raw_message:
+        return None
+
+    targets = [item.strip() for item in re.split(r"[,\s]+", raw_targets) if item.strip()]
+    if not targets:
+        return None
+
+    return targets, raw_message
+
+
 @router.message(Command("admin"))
 async def command_admin(message: Message) -> None:
     analytics_service, config = require_services()
@@ -140,6 +182,7 @@ async def command_admin(message: Message) -> None:
             "/funnel — воронка\n"
             "/users — последние пользователи\n"
             "/user ID — карточка пользователя\n"
+            "/send получатели | текст — отправить сообщение выбранным пользователям\n"
             "/export_users — CSV с пользователями\n"
             "/export_events — CSV с событиями\n"
             "/admin_logout — выйти из админки",
@@ -164,6 +207,7 @@ async def command_admin(message: Message) -> None:
         "/funnel\n"
         "/users\n"
         "/user ID\n"
+        "/send получатели | текст\n"
         "/export_users\n"
         "/export_events\n"
         "/admin_logout",
@@ -266,6 +310,69 @@ async def command_user(message: Message) -> None:
     await message.answer(text)
 
 
+@router.message(Command("send"))
+async def command_send(message: Message) -> None:
+    if not await ensure_admin_message(message):
+        return
+
+    parsed = parse_send_command(message.text or "")
+    if parsed is None:
+        await message.answer(mailing_help_text(), reply_markup=admin_keyboard())
+        return
+
+    targets, outgoing_text = parsed
+    analytics_service, _ = require_services()
+    users, unresolved = analytics_service.find_users_by_refs(targets)
+
+    if not users:
+        unresolved_text = ", ".join(unresolved) if unresolved else "—"
+        await message.answer(
+            "Не нашёл ни одного получателя в базе.\n\n"
+            f"Не найдены: {html.escape(unresolved_text)}",
+            reply_markup=admin_keyboard(),
+        )
+        return
+
+    sent_count = 0
+    failed: list[str] = []
+
+    safe_text = html.escape(outgoing_text)
+
+    for user in users:
+        try:
+            await message.bot.send_message(
+                chat_id=user["user_id"],
+                text=safe_text,
+            )
+            sent_count += 1
+        except Exception as exc:
+            username = user.get("username") or "—"
+            failed.append(f"{user['user_id']} (@{username}): {exc}")
+
+    report_lines = [
+        "<b>Результат рассылки</b>",
+        f"Запрошено получателей: <b>{len(targets)}</b>",
+        f"Найдено в базе: <b>{len(users)}</b>",
+        f"Успешно отправлено: <b>{sent_count}</b>",
+    ]
+
+    if unresolved:
+        report_lines.append("")
+        report_lines.append("<b>Не найдены в базе:</b>")
+        for item in unresolved:
+            report_lines.append(f"• <code>{html.escape(item)}</code>")
+
+    if failed:
+        report_lines.append("")
+        report_lines.append("<b>Ошибки доставки:</b>")
+        for item in failed[:20]:
+            report_lines.append(f"• {html.escape(item)}")
+        if len(failed) > 20:
+            report_lines.append(f"• И ещё {len(failed) - 20} ошибок")
+
+    await message.answer("\n".join(report_lines), reply_markup=admin_keyboard())
+
+
 @router.message(Command("export_users"))
 async def command_export_users(message: Message) -> None:
     if not await ensure_admin_message(message):
@@ -324,6 +431,14 @@ async def callback_admin_users(callback: CallbackQuery) -> None:
     blocks.extend(format_user_line(user) for user in users)
     for chunk in chunk_text(blocks):
         await callback.message.answer(chunk)
+
+
+@router.callback_query(lambda c: c.data == "admin:send_help")
+async def callback_admin_send_help(callback: CallbackQuery) -> None:
+    if not await ensure_admin_callback(callback):
+        return
+    await callback.answer()
+    await callback.message.answer(mailing_help_text(), reply_markup=admin_keyboard())
 
 
 @router.callback_query(lambda c: c.data == "admin:export_users")
