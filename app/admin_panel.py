@@ -251,6 +251,8 @@ def format_summary_text(summary: dict) -> str:
     return (
         "<b>📊 Общая статистика</b>\n\n"
         f"Всего пользователей: <b>{summary['total_users']}</b>\n"
+        f"Активных пользователей: <b>{summary['active_users']}</b>\n"
+        f"Неактивных пользователей: <b>{summary['inactive_users']}</b>\n"
         f"Новых сегодня: <b>{summary['users_today']}</b>\n"
         f"Активных за 24 часа: <b>{summary['active_24h']}</b>\n"
         f"Команд /start: <b>{summary['total_starts']}</b>\n"
@@ -270,8 +272,10 @@ def format_user_line(user: dict) -> str:
     first_name = html.escape(user.get("first_name") or "—")
     username = html.escape(user.get("username") or "—")
     last_step = html.escape(humanize_step(user.get("last_step")))
+    status = "неактивен" if user.get("bot_blocked") else "активен"
     return (
         f"<b>{first_name}</b> | ID: <code>{user['user_id']}</code> | @{username}\n"
+        f"Статус: {status}\n"
         f"Последний шаг: {last_step}\n"
         f"Последняя активность: {html.escape(user.get('last_seen') or '—')}"
     )
@@ -297,6 +301,8 @@ def mailing_help_text() -> str:
         "<b>✉️ Рассылка выбранным пользователям</b>\n\n"
         "Команда по ID и username:\n"
         "<code>/send 123456789,@username1,@username2 | Текст сообщения</code>\n\n"
+        "Команда для всех пользователей:\n"
+        "<code>/send all | Текст сообщения</code>\n\n"
         "Команда по сегменту:\n"
         "<code>/send_segment finance | Текст сообщения</code>\n\n"
         "Примеры сегментов:\n"
@@ -374,16 +380,21 @@ async def send_message_to_users(
     outgoing_text: str,
     unresolved: list[str] | None = None,
 ) -> None:
+    analytics_service, _ = require_services()
     sent_count = 0
     failed: list[str] = []
 
     for user in users:
         try:
             await message.bot.send_message(chat_id=user["user_id"], text=outgoing_text)
+            analytics_service.mark_user_blocked(user["user_id"], False)
             sent_count += 1
         except Exception as exc:
+            error_text = str(exc)
+            if "bot was blocked by the user" in error_text.lower() or "forbidden" in error_text.lower():
+                analytics_service.mark_user_blocked(user["user_id"], True)
             username = user.get("username") or "—"
-            failed.append(f"{user['user_id']} (@{username}): {exc}")
+            failed.append(f"{user['user_id']} (@{username}): {error_text}")
 
     report_lines = [
         "<b>Результат рассылки</b>",
@@ -429,6 +440,7 @@ async def command_admin(message: Message) -> None:
             "/segment alias — список пользователей по шагу\n"
             "/send получатели | текст — рассылка по ID/username\n"
             "/send_segment alias | текст — рассылка по сегменту\n"
+            "/reset_nurture ID_ИЛИ_@username — сбросить прогрев\n"
             "/notify_on — включить уведомления о новых входах\n"
             "/notify_off — выключить уведомления о новых входах\n"
             "/export_users — CSV с пользователями\n"
@@ -458,6 +470,7 @@ async def command_admin(message: Message) -> None:
         "/segment alias\n"
         "/send получатели | текст\n"
         "/send_segment alias | текст\n"
+        "/reset_nurture ID_ИЛИ_@username\n"
         "/notify_on\n"
         "/notify_off\n"
         "/export_users\n"
@@ -559,11 +572,13 @@ async def command_user(message: Message) -> None:
 
     user = details["user"]
     events = details["events"]
+    status = "неактивен" if user.get("bot_blocked") else "активен"
     lines = [
         "<b>Карточка пользователя</b>",
         f"ID: <code>{user['user_id']}</code>",
         f"Username: @{html.escape(user.get('username') or '—')}",
         f"Имя: {html.escape(user.get('first_name') or '—')}",
+        f"Статус: {status}",
         f"Первый визит: {html.escape(user.get('first_seen') or '—')}",
         f"Последний визит: {html.escape(user.get('last_seen') or '—')}",
         f"Последний шаг: {html.escape(humanize_step(user.get('last_step')))}",
@@ -625,6 +640,12 @@ async def command_send(message: Message) -> None:
 
     targets, outgoing_text = parsed
     analytics_service, _ = require_services()
+
+    if len(targets) == 1 and targets[0].lower() == "all":
+        users = analytics_service.get_all_users()
+        await send_message_to_users(message, users, outgoing_text)
+        return
+
     users, unresolved = analytics_service.find_users_by_refs(targets)
 
     if not users:
@@ -670,6 +691,25 @@ async def command_send_segment(message: Message) -> None:
         f"Найдено пользователей: <b>{len(users)}</b>"
     )
     await send_message_to_users(message, users, outgoing_text)
+
+
+@router.message(Command("reset_nurture"))
+async def command_reset_nurture(message: Message) -> None:
+    if not await ensure_admin_message(message):
+        return
+    analytics_service, _ = require_services()
+
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("Используй так: <code>/reset_nurture 123456789</code> или <code>/reset_nurture @username</code>")
+        return
+
+    ok = analytics_service.reset_nurture(parts[1].strip())
+    if not ok:
+        await message.answer("Не удалось сбросить прогрев: пользователь не найден или ещё не вошёл в воронку.")
+        return
+
+    await message.answer("✅ Прогрев для пользователя сброшен. Теперь цепочка начнётся заново от нового последнего действия.")
 
 
 @router.message(Command("export_users"))
