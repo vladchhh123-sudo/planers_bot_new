@@ -57,8 +57,7 @@ class AnalyticsService:
                     last_seen TEXT NOT NULL,
                     last_step TEXT,
                     current_step_updated_at TEXT,
-                    start_count INTEGER NOT NULL DEFAULT 0,
-                    bot_blocked INTEGER NOT NULL DEFAULT 0
+                    start_count INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS events (
@@ -93,15 +92,9 @@ class AnalyticsService:
                 CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
                 CREATE INDEX IF NOT EXISTS idx_users_last_step ON users(last_step);
                 CREATE INDEX IF NOT EXISTS idx_users_last_seen ON users(last_seen);
-                CREATE INDEX IF NOT EXISTS idx_users_blocked ON users(bot_blocked);
                 CREATE INDEX IF NOT EXISTS idx_nurture_last_activity ON nurture_state(last_activity_at);
                 """
             )
-
-            columns = {row[1] for row in cursor.execute("PRAGMA table_info(users)")}
-            if "bot_blocked" not in columns:
-                cursor.execute("ALTER TABLE users ADD COLUMN bot_blocked INTEGER NOT NULL DEFAULT 0")
-
             self._conn.commit()
 
     def identify_user(self, user: Any) -> None:
@@ -118,27 +111,18 @@ class AnalyticsService:
                 """
                 INSERT INTO users (
                     user_id, username, first_name, last_name, is_bot,
-                    language_code, first_seen, last_seen, bot_blocked
+                    language_code, first_seen, last_seen
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     username = excluded.username,
                     first_name = excluded.first_name,
                     last_name = excluded.last_name,
                     is_bot = excluded.is_bot,
                     language_code = excluded.language_code,
-                    last_seen = excluded.last_seen,
-                    bot_blocked = 0
+                    last_seen = excluded.last_seen
                 """,
                 (user_id, username, first_name, last_name, is_bot, language_code, now, now),
-            )
-            self._conn.commit()
-
-    def mark_user_blocked(self, user_id: int, blocked: bool = True) -> None:
-        with self._lock:
-            self._conn.execute(
-                "UPDATE users SET bot_blocked = ? WHERE user_id = ?",
-                (1 if blocked else 0, user_id),
             )
             self._conn.commit()
 
@@ -167,7 +151,7 @@ class AnalyticsService:
                 self._conn.execute(
                     """
                     UPDATE users
-                    SET last_step = ?, current_step_updated_at = ?, last_seen = ?, bot_blocked = 0
+                    SET last_step = ?, current_step_updated_at = ?, last_seen = ?
                     WHERE user_id = ?
                     """,
                     (step, now, now, user_id),
@@ -229,26 +213,6 @@ class AnalyticsService:
             ).fetchall()
         return {row["reminder_code"] for row in rows}
 
-    def reset_nurture(self, user_ref: str) -> bool:
-        user_row = self._resolve_user_row(user_ref)
-        if not user_row:
-            return False
-
-        user_id = user_row["user_id"]
-        now = utc_now_iso()
-        with self._lock:
-            self._conn.execute("DELETE FROM nurture_sent WHERE user_id = ?", (user_id,))
-            self._conn.execute(
-                """
-                UPDATE nurture_state
-                SET last_activity_at = ?, payment_reached = 0
-                WHERE user_id = ?
-                """,
-                (now, user_id),
-            )
-            self._conn.commit()
-        return True
-
     def get_due_nurture_reminders(self, reminders: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
         now = utc_now()
         with self._lock:
@@ -304,10 +268,6 @@ class AnalyticsService:
                 "SELECT COUNT(*) FROM users WHERE last_seen >= ?",
                 (active_since.isoformat(timespec="seconds"),),
             ).fetchone()[0]
-            inactive_users = self._conn.execute(
-                "SELECT COUNT(*) FROM users WHERE bot_blocked = 1"
-            ).fetchone()[0]
-            active_users = total_users - inactive_users
             total_events = self._conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
             total_starts = self._conn.execute(
                 "SELECT COALESCE(SUM(start_count), 0) FROM users"
@@ -326,8 +286,6 @@ class AnalyticsService:
             "total_users": total_users,
             "users_today": users_today,
             "active_24h": active_24h,
-            "active_users": active_users,
-            "inactive_users": inactive_users,
             "total_events": total_events,
             "total_starts": total_starts,
             "top_stops": [(row["step"], row["cnt"]) for row in stop_rows],
@@ -351,7 +309,7 @@ class AnalyticsService:
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT user_id, username, first_name, last_name, first_seen, last_seen, last_step, start_count, bot_blocked
+                SELECT user_id, username, first_name, last_name, first_seen, last_seen, last_step, start_count
                 FROM users
                 ORDER BY last_seen DESC
                 LIMIT ?
@@ -369,7 +327,7 @@ class AnalyticsService:
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT user_id, username, first_name, last_name, first_seen, last_seen, last_step, start_count, bot_blocked
+                SELECT user_id, username, first_name, last_name, first_seen, last_seen, last_step, start_count
                 FROM users
                 ORDER BY last_seen DESC
                 """
@@ -381,11 +339,11 @@ class AnalyticsService:
             user["last_seen"] = to_moscow_display(user.get("last_seen"))
         return users
 
-    def _resolve_user_row(self, user_ref: str) -> sqlite3.Row | None:
+    def get_user_details(self, user_ref: str, event_limit: int = 25) -> dict[str, Any] | None:
         value = user_ref.strip()
         query = """
             SELECT user_id, username, first_name, last_name, language_code,
-                   first_seen, last_seen, last_step, current_step_updated_at, start_count, bot_blocked
+                   first_seen, last_seen, last_step, current_step_updated_at, start_count
             FROM users
             WHERE user_id = ?
         """
@@ -397,14 +355,10 @@ class AnalyticsService:
             params = (value.lstrip("@").lower(),)
 
         with self._lock:
-            return self._conn.execute(query, params).fetchone()
+            user_row = self._conn.execute(query, params).fetchone()
+            if not user_row:
+                return None
 
-    def get_user_details(self, user_ref: str, event_limit: int = 25) -> dict[str, Any] | None:
-        user_row = self._resolve_user_row(user_ref)
-        if not user_row:
-            return None
-
-        with self._lock:
             event_rows = self._conn.execute(
                 """
                 SELECT id, event_type, step, payload_json, created_at
@@ -462,7 +416,7 @@ class AnalyticsService:
             params.extend(username_refs)
 
         query = f'''
-            SELECT user_id, username, first_name, last_name, first_seen, last_seen, last_step, start_count, bot_blocked
+            SELECT user_id, username, first_name, last_name, first_seen, last_seen, last_step, start_count
             FROM users
             WHERE {" OR ".join(clauses)}
         '''
@@ -504,7 +458,7 @@ class AnalyticsService:
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT DISTINCT u.user_id, u.username, u.first_name, u.last_name, u.first_seen, u.last_seen, u.last_step, u.start_count, u.bot_blocked
+                SELECT DISTINCT u.user_id, u.username, u.first_name, u.last_name, u.first_seen, u.last_seen, u.last_step, u.start_count
                 FROM users u
                 JOIN events e ON e.user_id = u.user_id
                 WHERE e.step = ?
@@ -536,7 +490,6 @@ class AnalyticsService:
                     "last_seen",
                     "last_step",
                     "start_count",
-                    "bot_blocked",
                 ],
             )
             writer.writeheader()
