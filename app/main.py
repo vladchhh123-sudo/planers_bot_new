@@ -45,6 +45,15 @@ from .keyboards import (
     url_button,
 )
 from .media import MediaNotFoundError, send_album
+from .nurture import (
+    append_payment_note,
+    setup_nurture,
+    track_bundle_context,
+    track_bundle_landing_context,
+    track_catalog_context,
+    track_payment_reached,
+    track_product_context,
+)
 from .utils import render_text, user_first_name
 
 router = Router()
@@ -94,6 +103,7 @@ async def send_product_album(
     product = PRODUCTS[product_id]
     name = user_first_name(callback.from_user)
     caption = render_text(product.album_caption, name=name)
+    caption = append_payment_note(caption)
     chat_id = callback.message.chat.id
 
     try:
@@ -111,6 +121,7 @@ async def send_product_album(
         return
 
     track_step(callback.from_user, f"product_{product_id}_card", payload={"source": source})
+    track_product_context(callback.from_user, product_id)
     await callback.message.answer(
         "Выбери цвет своего планера 🎨",
         reply_markup=choose_color_keyboard(product_id, source, "product"),
@@ -120,8 +131,8 @@ async def send_product_album(
 async def send_bundle_album(callback: CallbackQuery, bundle_id: str, config: Config) -> None:
     track_event(callback.from_user, "callback", payload={"data": callback.data})
     bundle = BUNDLES[bundle_id]
+    caption = append_payment_note(bundle.album_caption)
     chat_id = callback.message.chat.id
-
     try:
         await callback.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
         await send_album(
@@ -129,7 +140,7 @@ async def send_bundle_album(callback: CallbackQuery, bundle_id: str, config: Con
             chat_id=chat_id,
             base_dir=config.project_dir,
             relative_dir="assets/planners/combo",
-            caption=bundle.album_caption,
+            caption=caption,
             specific_files=(bundle.image_file,),
         )
     except MediaNotFoundError:
@@ -138,6 +149,7 @@ async def send_bundle_album(callback: CallbackQuery, bundle_id: str, config: Con
         return
 
     track_step(callback.from_user, f"bundle_{bundle_id}_card")
+    track_bundle_context(callback.from_user, bundle_id)
     await callback.message.answer(
         "Выбери цвет своего планера 🎨",
         reply_markup=choose_color_keyboard(bundle_id, "bundle", "bundle"),
@@ -148,6 +160,7 @@ async def send_offer_album(callback: CallbackQuery, config: Config) -> None:
     track_event(callback.from_user, "callback", payload={"data": callback.data})
     name = user_first_name(callback.from_user)
     caption = render_text(CHANNEL_OFFER_CAPTION, name=name)
+    caption = append_payment_note(caption)
     chat_id = callback.message.chat.id
 
     try:
@@ -173,7 +186,9 @@ async def send_product_payment(callback: CallbackQuery, product_id: str, color_i
     url = product.payment_urls[color_id]
     name = user_first_name(callback.from_user)
     text = render_text(PAYMENT_TEXT_SINGLE, name=name, url=url)
+    text = append_payment_note(text)
     track_step(callback.from_user, f"pay_product_{product_id}_{color_id}")
+    track_payment_reached(callback.from_user, "product", product_id)
     await callback.message.answer(text, reply_markup=url_button(BTN_TAKE_THIS_PLANNER, url))
 
 
@@ -182,7 +197,9 @@ async def send_bundle_payment(callback: CallbackQuery, bundle_id: str, color_id:
     url = bundle.payment_urls[color_id]
     name = user_first_name(callback.from_user)
     text = render_text(PAYMENT_TEXT_BUNDLE, name=name, url=url)
+    text = append_payment_note(text)
     track_step(callback.from_user, f"pay_bundle_{bundle_id}_{color_id}")
+    track_payment_reached(callback.from_user, "bundle", bundle_id)
     await callback.message.answer(text, reply_markup=url_button(BTN_TAKE_SET, url))
 
 
@@ -200,6 +217,7 @@ async def command_start(message: Message) -> None:
 async def command_menu(message: Message) -> None:
     track_user(message.from_user)
     track_step(message.from_user, "catalog_menu")
+    track_catalog_context(message.from_user)
     await message.answer(CATALOG_TEXT, reply_markup=planners_keyboard("main"))
 
 
@@ -207,6 +225,7 @@ async def command_menu(message: Message) -> None:
 async def open_catalog(callback: CallbackQuery) -> None:
     track_event(callback.from_user, "callback", payload={"data": callback.data})
     track_step(callback.from_user, "catalog_menu")
+    track_catalog_context(callback.from_user)
     await callback.answer()
     await callback.message.answer(CATALOG_TEXT, reply_markup=planners_keyboard("main"))
 
@@ -223,6 +242,7 @@ async def open_channel_payment(callback: CallbackQuery) -> None:
     await callback.answer()
     name = user_first_name(callback.from_user)
     text = render_text(PAYMENT_TEXT_CHANNEL, name=name, url=CHANNEL_URL)
+    text = append_payment_note(text)
     track_step(callback.from_user, "pay_channel_offer")
     await callback.message.answer(text, reply_markup=url_button(BTN_JOIN_CHANNEL, CHANNEL_URL))
 
@@ -253,7 +273,9 @@ async def open_bundles(callback: CallbackQuery) -> None:
     await callback.answer()
     name = user_first_name(callback.from_user)
     text = render_text(BUNDLES_LANDING_TEXT, name=name)
+    text = append_payment_note(text)
     track_step(callback.from_user, "bundles_landing")
+    track_bundle_landing_context(callback.from_user)
     await callback.message.answer(text, reply_markup=bundles_keyboard())
 
 
@@ -281,6 +303,10 @@ async def open_colors(callback: CallbackQuery) -> None:
     await callback.answer()
     _, kind, item_id, source = callback.data.split(":", maxsplit=3)
     track_step(callback.from_user, f"colors_{kind}_{item_id}", payload={"source": source})
+    if kind == "product":
+        track_product_context(callback.from_user, item_id)
+    elif kind == "bundle":
+        track_bundle_context(callback.from_user, item_id)
     await callback.message.answer(
         "Выбери цвет своего планера 🎨",
         reply_markup=colors_keyboard(item_id, source, kind),
@@ -304,13 +330,12 @@ async def choose_color(callback: CallbackQuery) -> None:
             else MAIN_FLOW_AFTER_COLOR_TEXT
         )
         track_step(callback.from_user, f"after_color_{item_id}_{color_id}")
-        await callback.message.answer(
-            text,
-            reply_markup=planner_post_color_keyboard(item_id, color_id),
-        )
+        track_product_context(callback.from_user, item_id)
+        await callback.message.answer(text, reply_markup=planner_post_color_keyboard(item_id, color_id))
         return
 
     if kind == "bundle":
+        track_bundle_context(callback.from_user, item_id)
         await send_bundle_payment(callback, item_id, color_id)
 
 
@@ -330,6 +355,7 @@ async def on_startup(bot: Bot, config: Config) -> None:
         analytics_service.initialize()
 
     setup_admin_panel(analytics_service, config)
+    setup_nurture(analytics_service, bot)
 
     await bot.delete_webhook(drop_pending_updates=False)
 

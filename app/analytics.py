@@ -28,7 +28,7 @@ def to_moscow_display(value: str | None) -> str:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         dt_msk = dt.astimezone(MOSCOW_TZ)
-        return dt_msk.strftime("%d.%m.%Y %H:%M:%S")
+        return dt_msk.strftime("%d.%m.%Y %H:%M:%S") + " МСК"
     except Exception:
         return value
 
@@ -70,11 +70,29 @@ class AnalyticsService:
                     FOREIGN KEY (user_id) REFERENCES users(user_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS nurture_state (
+                    user_id INTEGER PRIMARY KEY,
+                    context_type TEXT,
+                    context_id TEXT,
+                    last_activity_at TEXT NOT NULL,
+                    payment_reached INTEGER NOT NULL DEFAULT 0,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS nurture_sent (
+                    user_id INTEGER NOT NULL,
+                    reminder_code TEXT NOT NULL,
+                    sent_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, reminder_code),
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_events_user_id ON events(user_id);
                 CREATE INDEX IF NOT EXISTS idx_events_step ON events(step);
                 CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
                 CREATE INDEX IF NOT EXISTS idx_users_last_step ON users(last_step);
                 CREATE INDEX IF NOT EXISTS idx_users_last_seen ON users(last_seen);
+                CREATE INDEX IF NOT EXISTS idx_nurture_last_activity ON nurture_state(last_activity_at);
                 """
             )
             self._conn.commit()
@@ -149,6 +167,90 @@ class AnalyticsService:
 
     def track_step(self, user: Any, step: str, payload: dict[str, Any] | None = None) -> None:
         self.track_event(user=user, event_type="step", step=step, payload=payload)
+
+    def set_nurture_context(
+        self,
+        user: Any,
+        context_type: str,
+        context_id: str | None = None,
+        payment_reached: bool = False,
+    ) -> None:
+        self.identify_user(user)
+        user_id = int(user.id)
+        now = utc_now_iso()
+
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO nurture_state (user_id, context_type, context_id, last_activity_at, payment_reached)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    context_type = excluded.context_type,
+                    context_id = excluded.context_id,
+                    last_activity_at = excluded.last_activity_at,
+                    payment_reached = excluded.payment_reached
+                """,
+                (user_id, context_type, context_id, now, 1 if payment_reached else 0),
+            )
+            self._conn.commit()
+
+    def mark_nurture_sent(self, user_id: int, reminder_code: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT OR REPLACE INTO nurture_sent (user_id, reminder_code, sent_at)
+                VALUES (?, ?, ?)
+                """,
+                (user_id, reminder_code, utc_now_iso()),
+            )
+            self._conn.commit()
+
+    def get_sent_reminder_codes(self, user_id: int) -> set[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT reminder_code FROM nurture_sent WHERE user_id = ?",
+                (user_id,),
+            ).fetchall()
+        return {row["reminder_code"] for row in rows}
+
+    def get_due_nurture_reminders(self, reminders: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
+        now = utc_now()
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT s.user_id, s.context_type, s.context_id, s.last_activity_at, s.payment_reached,
+                       u.username, u.first_name
+                FROM nurture_state s
+                JOIN users u ON u.user_id = s.user_id
+                WHERE s.payment_reached = 0
+                ORDER BY s.last_activity_at ASC
+                """
+            ).fetchall()
+
+        due_items: list[dict[str, Any]] = []
+        for row in rows:
+            user_id = row["user_id"]
+            last_activity = datetime.fromisoformat(row["last_activity_at"])
+            if last_activity.tzinfo is None:
+                last_activity = last_activity.replace(tzinfo=timezone.utc)
+
+            sent_codes = self.get_sent_reminder_codes(user_id)
+            for reminder in reminders:
+                if reminder["code"] in sent_codes:
+                    continue
+                if now >= last_activity + timedelta(hours=reminder["hours"]):
+                    due_items.append(
+                        {
+                            "user_id": user_id,
+                            "username": row["username"],
+                            "first_name": row["first_name"],
+                            "context_type": row["context_type"],
+                            "context_id": row["context_id"],
+                            "reminder": reminder,
+                        }
+                    )
+                    break
+        return due_items
 
     def get_summary(self) -> dict[str, Any]:
         now = utc_now()
