@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from aiogram import Bot
@@ -12,8 +11,6 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from .analytics import AnalyticsService
 
 logger = logging.getLogger(__name__)
-
-PAYMENT_NOTE_HTML = "‼️ <b>Оплатить можно любой банковской картой из любой страны и в любой валюте.</b>"
 
 REMINDERS: tuple[dict[str, Any], ...] = (
     {
@@ -215,9 +212,7 @@ _bot: Bot | None = None
 
 
 def append_payment_note(text: str) -> str:
-    if PAYMENT_NOTE_HTML in text:
-        return text
-    return f"{text}\n\n{PAYMENT_NOTE_HTML}"
+    return text
 
 
 def setup_nurture(analytics_service: AnalyticsService, bot: Bot) -> None:
@@ -280,16 +275,16 @@ def _callback_for_action(action: str, context_type: str | None, context_id: str 
 
 def _build_keyboard(reminder: dict[str, Any], context_type: str | None, context_id: str | None) -> InlineKeyboardMarkup:
     rows = []
-    for row in reminder["buttons"]:
-        buttons = []
-        for title, action in row:
-            buttons.append(
+    for item in reminder["buttons"]:
+        title, action = item
+        rows.append(
+            [
                 InlineKeyboardButton(
                     text=title,
                     callback_data=_callback_for_action(action, context_type, context_id),
                 )
-            )
-        rows.append(buttons)
+            ]
+        )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -310,7 +305,6 @@ async def _process_due_reminders() -> None:
         reminder = item["reminder"]
         name = html.escape(item.get("first_name") or "друг")
         text = reminder["text"].format(name=name)
-        text = append_payment_note(text)
         keyboard = _build_keyboard(reminder, item.get("context_type"), item.get("context_id"))
 
         try:
@@ -319,3 +313,4 @@ async def _process_due_reminders() -> None:
             logger.exception("Failed to send nurture reminder %s to %s", reminder["code"], item["user_id"])
         finally:
             _analytics.mark_nurture_sent(item["user_id"], reminder["code"])
+

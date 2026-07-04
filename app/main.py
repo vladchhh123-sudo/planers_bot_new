@@ -206,6 +206,8 @@ async def send_bundle_payment(callback: CallbackQuery, bundle_id: str, color_id:
 @router.message(Command("start"))
 async def command_start(message: Message) -> None:
     track_user(message.from_user)
+    if analytics_service is not None:
+        analytics_service.restart_nurture_cycle(message.from_user)
     track_event(message.from_user, "start_command", step="start_screen")
     name = user_first_name(message.from_user)
     text = render_text(START_TEXT, name=name)
@@ -403,3 +405,5 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
