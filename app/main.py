@@ -142,6 +142,7 @@ async def send_bundle_album(callback: CallbackQuery, bundle_id: str, config: Con
     bundle = BUNDLES[bundle_id]
     caption = append_payment_note(bundle.album_caption)
     chat_id = callback.message.chat.id
+
     try:
         await callback.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
         await send_album(
@@ -346,6 +347,7 @@ async def open_bundles(callback: CallbackQuery) -> None:
     await callback.answer()
     name = user_first_name(callback.from_user)
     text = render_text(BUNDLES_LANDING_TEXT, name=name)
+    text = append_payment_note(text)
     track_step(callback.from_user, "bundles_landing")
     track_bundle_landing_context(callback.from_user)
     await callback.message.answer(text, reply_markup=bundles_keyboard())

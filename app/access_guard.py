@@ -70,9 +70,11 @@ def has_recorded_request(user_id: int) -> bool:
 
 
 async def has_channel_access(bot: Bot, user_id: int) -> bool:
+    # Если бот уже видел заявку на вступление — пускаем
     if has_recorded_request(user_id):
         return True
 
+    # Если знаем channel_id, проверяем, вдруг пользователь уже принят в канал
     channel_id = _state.get("channel_id")
     if channel_id is None:
         return False
