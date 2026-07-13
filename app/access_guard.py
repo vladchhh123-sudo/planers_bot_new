@@ -111,7 +111,12 @@ def _channel_key(channel: dict[str, Any]) -> str:
     return channel.get("invite_url", "")
 
 
-def register_join_request(chat_id: int, user_id: int, chat_title: str | None = None, invite_url: str | None = None) -> None:
+def register_join_request(
+    chat_id: int,
+    user_id: int,
+    chat_title: str | None = None,
+    invite_url: str | None = None,
+) -> None:
     channels = _state.setdefault("channels", [])
     if not channels:
         return
@@ -179,12 +184,11 @@ def build_access_keyboard() -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
 
     if channels:
-        for idx, channel in enumerate(channels, start=1):
-            title = channel.get("title") or f"КАНАЛ {idx}"
+        for channel in channels:
             rows.append(
                 [
                     InlineKeyboardButton(
-                        text=f"📢 ПОДАТЬ ЗАЯВКУ: {title}",
+                        text="📢 ПОДПИСАТЬСЯ",
                         url=channel["invite_url"],
                     )
                 ]
@@ -199,7 +203,7 @@ def build_access_keyboard() -> InlineKeyboardMarkup:
             ]
         )
 
-    rows.append([InlineKeyboardButton(text="✅ Я ПОДАЛ(А) ЗАЯВКУ", callback_data=CHECK_ACCESS_CALLBACK)])
+    rows.append([InlineKeyboardButton(text="✅ Я ПОДПИСАЛСЯ(АСЬ)", callback_data=CHECK_ACCESS_CALLBACK)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -211,23 +215,17 @@ def start_access_text(name: str) -> str:
             "Список обязательных каналов пока не настроен администратором. Попробуй позже."
         )
 
-    channels_text = "\n".join(
-        f"• {channel.get('title') or channel.get('invite_url')}\n  {channel.get('invite_url')}"
-        for channel in channels
-    )
-
     return (
         f"{name}, привет!\n\n"
-        "Чтобы получить планер, сначала подай заявку на вступление в канал(ы):\n\n"
-        f"{channels_text}\n\n"
-        "После этого нажми кнопку ниже. 👇"
+        "Чтобы получить планер, сначала подпишись на канал.\n\n"
+        "После этого нажми ✅ Я ПОДПИСАЛСЯ(АСЬ)"
     )
 
 
-def retry_access_text() -> str:
+def retry_access_text(name: str) -> str:
     return (
-        "Похоже, ты ещё не подал(а) заявку на вступление во все обязательные каналы.\n\n"
-        "Сначала перейди по кнопкам, отправь заявку на вступление, а потом нажми проверку ещё раз."
+        f"{name}, похоже, ты ещё не подписался(ась)...\n\n"
+        "Попробуй ещё раз и нажми кнопку ✅ Я ПОДПИСАЛСЯ(АСЬ)"
     )
 
 

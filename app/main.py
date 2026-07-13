@@ -142,6 +142,7 @@ async def send_bundle_album(callback: CallbackQuery, bundle_id: str, config: Con
     bundle = BUNDLES[bundle_id]
     caption = append_payment_note(bundle.album_caption)
     chat_id = callback.message.chat.id
+
     try:
         await callback.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
         await send_album(
@@ -166,9 +167,28 @@ async def send_bundle_album(callback: CallbackQuery, bundle_id: str, config: Con
 
 
 async def send_offer_album(callback: CallbackQuery, config: Config) -> None:
-    # Канал ПЛАНИРУЙ+ больше не используется.
-    # Кнопка предложения теперь ведёт сразу в наборы.
-    await open_bundles(callback)
+    track_event(callback.from_user, "callback", payload={"data": callback.data})
+    name = user_first_name(callback.from_user)
+    caption = render_text(CHANNEL_OFFER_CAPTION, name=name)
+    caption = append_payment_note(caption)
+    chat_id = callback.message.chat.id
+
+    try:
+        await callback.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
+        await send_album(
+            bot=callback.bot,
+            chat_id=chat_id,
+            base_dir=config.project_dir,
+            relative_dir="assets/channel_offer",
+            caption=caption,
+        )
+    except MediaNotFoundError:
+        logger.exception("Media not found for channel offer")
+        await send_missing_media_notice(callback)
+        return
+
+    track_step(callback.from_user, "offer_channel_plus")
+    await callback.message.answer("Выбери следующий шаг 👇", reply_markup=offer_keyboard())
 
 
 async def send_product_payment(callback: CallbackQuery, product_id: str, color_id: str) -> None:
@@ -237,8 +257,9 @@ async def check_channel_access(callback: CallbackQuery) -> None:
     track_event(callback.from_user, "callback", payload={"data": callback.data})
     has_access = await has_channel_access(callback.bot, callback.from_user.id)
     if not has_access:
-        await callback.answer("Сначала подай заявку и попробуй ещё раз", show_alert=True)
-        await callback.message.answer(retry_access_text(), reply_markup=build_access_keyboard())
+        name = user_first_name(callback.from_user)
+        await callback.answer("Сначала подпишись и попробуй ещё раз", show_alert=True)
+        await callback.message.answer(retry_access_text(name), reply_markup=build_access_keyboard())
         return
 
     track_step(callback.from_user, "catalog_menu")
@@ -252,8 +273,9 @@ async def open_catalog(callback: CallbackQuery) -> None:
     track_event(callback.from_user, "callback", payload={"data": callback.data})
     has_access = await has_channel_access(callback.bot, callback.from_user.id)
     if not has_access:
-        await callback.answer("Сначала подай заявку и попробуй ещё раз", show_alert=True)
-        await callback.message.answer(retry_access_text(), reply_markup=build_access_keyboard())
+        name = user_first_name(callback.from_user)
+        await callback.answer("Сначала подпишись и попробуй ещё раз", show_alert=True)
+        await callback.message.answer(retry_access_text(name), reply_markup=build_access_keyboard())
         return
 
     track_step(callback.from_user, "catalog_menu")
@@ -266,8 +288,9 @@ async def open_catalog(callback: CallbackQuery) -> None:
 async def open_offer(callback: CallbackQuery, config: Config) -> None:
     has_access = await has_channel_access(callback.bot, callback.from_user.id)
     if not has_access:
-        await callback.answer("Сначала подай заявку и попробуй ещё раз", show_alert=True)
-        await callback.message.answer(retry_access_text(), reply_markup=build_access_keyboard())
+        name = user_first_name(callback.from_user)
+        await callback.answer("Сначала подпишись и попробуй ещё раз", show_alert=True)
+        await callback.message.answer(retry_access_text(name), reply_markup=build_access_keyboard())
         return
 
     await callback.answer("Открываю предложение…")
@@ -276,16 +299,29 @@ async def open_offer(callback: CallbackQuery, config: Config) -> None:
 
 @router.callback_query(F.data == "offer:channel")
 async def open_channel_payment(callback: CallbackQuery) -> None:
-    # Старый путь на канал ПЛАНИРУЙ+ заменён на наборы.
-    await open_bundles(callback)
+    has_access = await has_channel_access(callback.bot, callback.from_user.id)
+    if not has_access:
+        name = user_first_name(callback.from_user)
+        await callback.answer("Сначала подпишись и попробуй ещё раз", show_alert=True)
+        await callback.message.answer(retry_access_text(name), reply_markup=build_access_keyboard())
+        return
+
+    track_event(callback.from_user, "callback", payload={"data": callback.data})
+    await callback.answer()
+    name = user_first_name(callback.from_user)
+    text = render_text(PAYMENT_TEXT_CHANNEL, name=name, url=CHANNEL_URL)
+    text = append_payment_note(text)
+    track_step(callback.from_user, "pay_channel_offer")
+    await callback.message.answer(text, reply_markup=url_button(BTN_JOIN_CHANNEL, CHANNEL_URL))
 
 
 @router.callback_query(F.data == "offer:single")
 async def open_offer_fallback(callback: CallbackQuery) -> None:
     has_access = await has_channel_access(callback.bot, callback.from_user.id)
     if not has_access:
-        await callback.answer("Сначала подай заявку и попробуй ещё раз", show_alert=True)
-        await callback.message.answer(retry_access_text(), reply_markup=build_access_keyboard())
+        name = user_first_name(callback.from_user)
+        await callback.answer("Сначала подпишись и попробуй ещё раз", show_alert=True)
+        await callback.message.answer(retry_access_text(name), reply_markup=build_access_keyboard())
         return
 
     track_event(callback.from_user, "callback", payload={"data": callback.data})
@@ -300,8 +336,9 @@ async def open_offer_fallback(callback: CallbackQuery) -> None:
 async def open_offer_fallback_planner_menu(callback: CallbackQuery) -> None:
     has_access = await has_channel_access(callback.bot, callback.from_user.id)
     if not has_access:
-        await callback.answer("Сначала подай заявку и попробуй ещё раз", show_alert=True)
-        await callback.message.answer(retry_access_text(), reply_markup=build_access_keyboard())
+        name = user_first_name(callback.from_user)
+        await callback.answer("Сначала подпишись и попробуй ещё раз", show_alert=True)
+        await callback.message.answer(retry_access_text(name), reply_markup=build_access_keyboard())
         return
 
     track_event(callback.from_user, "callback", payload={"data": callback.data})
@@ -316,8 +353,9 @@ async def open_offer_fallback_planner_menu(callback: CallbackQuery) -> None:
 async def open_bundles(callback: CallbackQuery) -> None:
     has_access = await has_channel_access(callback.bot, callback.from_user.id)
     if not has_access:
-        await callback.answer("Сначала подай заявку и попробуй ещё раз", show_alert=True)
-        await callback.message.answer(retry_access_text(), reply_markup=build_access_keyboard())
+        name = user_first_name(callback.from_user)
+        await callback.answer("Сначала подпишись и попробуй ещё раз", show_alert=True)
+        await callback.message.answer(retry_access_text(name), reply_markup=build_access_keyboard())
         return
 
     track_event(callback.from_user, "callback", payload={"data": callback.data})
@@ -333,8 +371,9 @@ async def open_bundles(callback: CallbackQuery) -> None:
 async def open_product(callback: CallbackQuery, config: Config) -> None:
     has_access = await has_channel_access(callback.bot, callback.from_user.id)
     if not has_access:
-        await callback.answer("Сначала подай заявку и попробуй ещё раз", show_alert=True)
-        await callback.message.answer(retry_access_text(), reply_markup=build_access_keyboard())
+        name = user_first_name(callback.from_user)
+        await callback.answer("Сначала подпишись и попробуй ещё раз", show_alert=True)
+        await callback.message.answer(retry_access_text(name), reply_markup=build_access_keyboard())
         return
 
     await callback.answer("Загружаю планер…")
@@ -348,8 +387,9 @@ async def open_product(callback: CallbackQuery, config: Config) -> None:
 async def open_bundle(callback: CallbackQuery, config: Config) -> None:
     has_access = await has_channel_access(callback.bot, callback.from_user.id)
     if not has_access:
-        await callback.answer("Сначала подай заявку и попробуй ещё раз", show_alert=True)
-        await callback.message.answer(retry_access_text(), reply_markup=build_access_keyboard())
+        name = user_first_name(callback.from_user)
+        await callback.answer("Сначала подпишись и попробуй ещё раз", show_alert=True)
+        await callback.message.answer(retry_access_text(name), reply_markup=build_access_keyboard())
         return
 
     await callback.answer("Загружаю набор…")
@@ -363,8 +403,9 @@ async def open_bundle(callback: CallbackQuery, config: Config) -> None:
 async def open_colors(callback: CallbackQuery) -> None:
     has_access = await has_channel_access(callback.bot, callback.from_user.id)
     if not has_access:
-        await callback.answer("Сначала подай заявку и попробуй ещё раз", show_alert=True)
-        await callback.message.answer(retry_access_text(), reply_markup=build_access_keyboard())
+        name = user_first_name(callback.from_user)
+        await callback.answer("Сначала подпишись и попробуй ещё раз", show_alert=True)
+        await callback.message.answer(retry_access_text(name), reply_markup=build_access_keyboard())
         return
 
     track_event(callback.from_user, "callback", payload={"data": callback.data})
@@ -385,8 +426,9 @@ async def open_colors(callback: CallbackQuery) -> None:
 async def choose_color(callback: CallbackQuery) -> None:
     has_access = await has_channel_access(callback.bot, callback.from_user.id)
     if not has_access:
-        await callback.answer("Сначала подай заявку и попробуй ещё раз", show_alert=True)
-        await callback.message.answer(retry_access_text(), reply_markup=build_access_keyboard())
+        name = user_first_name(callback.from_user)
+        await callback.answer("Сначала подпишись и попробуй ещё раз", show_alert=True)
+        await callback.message.answer(retry_access_text(name), reply_markup=build_access_keyboard())
         return
 
     track_event(callback.from_user, "callback", payload={"data": callback.data})
@@ -417,8 +459,9 @@ async def choose_color(callback: CallbackQuery) -> None:
 async def pay_product(callback: CallbackQuery) -> None:
     has_access = await has_channel_access(callback.bot, callback.from_user.id)
     if not has_access:
-        await callback.answer("Сначала подай заявку и попробуй ещё раз", show_alert=True)
-        await callback.message.answer(retry_access_text(), reply_markup=build_access_keyboard())
+        name = user_first_name(callback.from_user)
+        await callback.answer("Сначала подпишись и попробуй ещё раз", show_alert=True)
+        await callback.message.answer(retry_access_text(name), reply_markup=build_access_keyboard())
         return
 
     track_event(callback.from_user, "callback", payload={"data": callback.data})
