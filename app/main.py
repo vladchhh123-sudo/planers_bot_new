@@ -25,32 +25,25 @@ from .catalog import (
     BUNDLES,
     BUNDLES_LANDING_TEXT,
     CATALOG_TEXT,
-    CHANNEL_OFFER_CAPTION,
-    CHANNEL_URL,
     HABITS_WHITE_SPECIAL_TEXT,
     MAIN_FLOW_AFTER_COLOR_TEXT,
     OFFER_FALLBACK_MENU_TEXT,
     OFFER_FALLBACK_TEXT,
     PAYMENT_TEXT_BUNDLE,
-    PAYMENT_TEXT_CHANNEL,
     PAYMENT_TEXT_SINGLE,
     PLANNERS_LIST_BLOCK,
     PRODUCTS,
-    START_TEXT,
 )
 from .config import Config
 from .keyboards import (
-    BTN_JOIN_CHANNEL,
     BTN_TAKE_SET,
     BTN_TAKE_THIS_PLANNER,
     bundles_keyboard,
     choose_color_keyboard,
     colors_keyboard,
     offer_fallback_keyboard,
-    offer_keyboard,
     planner_post_color_keyboard,
     planners_keyboard,
-    start_keyboard,
     url_button,
 )
 from .media import MediaNotFoundError, send_album
@@ -166,31 +159,6 @@ async def send_bundle_album(callback: CallbackQuery, bundle_id: str, config: Con
     )
 
 
-async def send_offer_album(callback: CallbackQuery, config: Config) -> None:
-    track_event(callback.from_user, "callback", payload={"data": callback.data})
-    name = user_first_name(callback.from_user)
-    caption = render_text(CHANNEL_OFFER_CAPTION, name=name)
-    caption = append_payment_note(caption)
-    chat_id = callback.message.chat.id
-
-    try:
-        await callback.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
-        await send_album(
-            bot=callback.bot,
-            chat_id=chat_id,
-            base_dir=config.project_dir,
-            relative_dir="assets/channel_offer",
-            caption=caption,
-        )
-    except MediaNotFoundError:
-        logger.exception("Media not found for channel offer")
-        await send_missing_media_notice(callback)
-        return
-
-    track_step(callback.from_user, "offer_channel_plus")
-    await callback.message.answer("Выбери следующий шаг 👇", reply_markup=offer_keyboard())
-
-
 async def send_product_payment(callback: CallbackQuery, product_id: str, color_id: str) -> None:
     product = PRODUCTS[product_id]
     url = product.payment_urls[color_id]
@@ -285,7 +253,7 @@ async def open_catalog(callback: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data == "offer")
-async def open_offer(callback: CallbackQuery, config: Config) -> None:
+async def open_offer(callback: CallbackQuery) -> None:
     has_access = await has_channel_access(callback.bot, callback.from_user.id)
     if not has_access:
         name = user_first_name(callback.from_user)
@@ -293,8 +261,7 @@ async def open_offer(callback: CallbackQuery, config: Config) -> None:
         await callback.message.answer(retry_access_text(name), reply_markup=build_access_keyboard())
         return
 
-    await callback.answer("Открываю предложение…")
-    await send_offer_album(callback, config)
+    await open_bundles(callback)
 
 
 @router.callback_query(F.data == "offer:channel")
@@ -306,13 +273,7 @@ async def open_channel_payment(callback: CallbackQuery) -> None:
         await callback.message.answer(retry_access_text(name), reply_markup=build_access_keyboard())
         return
 
-    track_event(callback.from_user, "callback", payload={"data": callback.data})
-    await callback.answer()
-    name = user_first_name(callback.from_user)
-    text = render_text(PAYMENT_TEXT_CHANNEL, name=name, url=CHANNEL_URL)
-    text = append_payment_note(text)
-    track_step(callback.from_user, "pay_channel_offer")
-    await callback.message.answer(text, reply_markup=url_button(BTN_JOIN_CHANNEL, CHANNEL_URL))
+    await open_bundles(callback)
 
 
 @router.callback_query(F.data == "offer:single")
@@ -362,6 +323,7 @@ async def open_bundles(callback: CallbackQuery) -> None:
     await callback.answer()
     name = user_first_name(callback.from_user)
     text = render_text(BUNDLES_LANDING_TEXT, name=name)
+    text = append_payment_note(text)
     track_step(callback.from_user, "bundles_landing")
     track_bundle_landing_context(callback.from_user)
     await callback.message.answer(text, reply_markup=bundles_keyboard())
@@ -447,7 +409,10 @@ async def choose_color(callback: CallbackQuery) -> None:
         )
         track_step(callback.from_user, f"after_color_{item_id}_{color_id}")
         track_product_context(callback.from_user, item_id)
-        await callback.message.answer(text, reply_markup=planner_post_color_keyboard(item_id, color_id))
+        await callback.message.answer(
+            text,
+            reply_markup=planner_post_color_keyboard(item_id, color_id),
+        )
         return
 
     if kind == "bundle":
