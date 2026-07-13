@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from aiogram import Bot, Router
+from aiogram import Bot, Router, F
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import (
@@ -17,6 +17,11 @@ from aiogram.types import (
     Message,
 )
 
+from .access_guard import (
+    add_required_channel,
+    channels_help_text,
+    remove_required_channel,
+)
 from .analytics import AnalyticsService
 from .config import Config
 
@@ -168,6 +173,7 @@ def admin_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🧭 Воронка", callback_data="admin:funnel")],
             [InlineKeyboardButton(text="👥 Последние пользователи", callback_data="admin:users")],
             [InlineKeyboardButton(text="🎯 Сегменты", callback_data="admin:segments")],
+            [InlineKeyboardButton(text="📢 Каналы", callback_data="admin:channels")],
             [InlineKeyboardButton(text="✉️ Рассылка", callback_data="admin:send")],
             [
                 InlineKeyboardButton(text="🔔 Включить уведомления", callback_data="admin:notify_on"),
@@ -442,6 +448,9 @@ async def command_admin(message: Message) -> None:
             "/users — последние пользователи\n"
             "/user ID_ИЛИ_@username — карточка пользователя\n"
             "/segment alias — список пользователей по шагу\n"
+            "/channels — список обязательных каналов\n"
+            "/add_channel ссылка — добавить канал\n"
+            "/remove_channel номер — удалить канал\n"
             "/send получатели | текст — рассылка по ID/username\n"
             "/send_segment alias | текст — рассылка по сегменту\n"
             "/reset_nurture ID_ИЛИ_@username — сбросить прогрев\n"
@@ -472,6 +481,9 @@ async def command_admin(message: Message) -> None:
         "/users\n"
         "/user ID_ИЛИ_@username\n"
         "/segment alias\n"
+        "/channels\n"
+        "/add_channel ссылка\n"
+        "/remove_channel номер\n"
         "/send получатели | текст\n"
         "/send_segment alias | текст\n"
         "/reset_nurture ID_ИЛИ_@username\n"
@@ -632,6 +644,68 @@ async def command_segment(message: Message) -> None:
         await message.answer(chunk)
 
 
+@router.message(Command("channels"))
+@router.message(F.text.regexp(r"^/channels(?:@\\w+)?$"))
+async def command_channels(message: Message) -> None:
+    if not await ensure_admin_message(message):
+        return
+    await message.answer(channels_help_text(), reply_markup=admin_keyboard())
+
+
+@router.message(Command("add_channel"))
+@router.message(F.text.regexp(r"^/add_channel(?:@\\w+)?\\s+"))
+async def command_add_channel(message: Message) -> None:
+    if not await ensure_admin_message(message):
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer(
+            "Используй так: <code>/add_channel https://t.me/+example</code>",
+            reply_markup=admin_keyboard(),
+        )
+        return
+
+    invite_url = parts[1].strip()
+    if not invite_url.startswith("https://t.me/"):
+        await message.answer(
+            "Укажи корректную ссылку вида <code>https://t.me/+example</code>",
+            reply_markup=admin_keyboard(),
+        )
+        return
+
+    created = add_required_channel(invite_url)
+    if not created:
+        await message.answer("Этот канал уже добавлен.", reply_markup=admin_keyboard())
+        return
+
+    await message.answer("✅ Канал добавлен в обязательные.", reply_markup=admin_keyboard())
+    await message.answer(channels_help_text(), reply_markup=admin_keyboard())
+
+
+@router.message(Command("remove_channel"))
+@router.message(F.text.regexp(r"^/remove_channel(?:@\\w+)?\\s+"))
+async def command_remove_channel(message: Message) -> None:
+    if not await ensure_admin_message(message):
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer(
+            "Используй так: <code>/remove_channel 1</code>",
+            reply_markup=admin_keyboard(),
+        )
+        return
+
+    removed = remove_required_channel(parts[1].strip())
+    if not removed:
+        await message.answer("Не удалось удалить канал. Проверь номер или ссылку.", reply_markup=admin_keyboard())
+        return
+
+    await message.answer("✅ Канал удалён.", reply_markup=admin_keyboard())
+    await message.answer(channels_help_text(), reply_markup=admin_keyboard())
+
+
 @router.message(Command("send"))
 async def command_send(message: Message) -> None:
     if not await ensure_admin_message(message):
@@ -782,6 +856,14 @@ async def callback_admin_segments(callback: CallbackQuery) -> None:
         return
     await callback.answer()
     await callback.message.answer(segments_help_text(), reply_markup=admin_keyboard())
+
+
+@router.callback_query(lambda c: c.data == "admin:channels")
+async def callback_admin_channels(callback: CallbackQuery) -> None:
+    if not await ensure_admin_callback(callback):
+        return
+    await callback.answer()
+    await callback.message.answer(channels_help_text(), reply_markup=admin_keyboard())
 
 
 @router.callback_query(lambda c: c.data == "admin:send")
