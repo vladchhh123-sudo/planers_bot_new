@@ -10,7 +10,7 @@ from aiogram.enums import ChatAction, ParseMode
 from aiogram.filters import Command
 from aiogram.types import BotCommand, CallbackQuery, ChatJoinRequest, Message
 
-# --- ИМПОРТЫ БЕЗ ТОЧЕК ---
+# --- ИМПОРТЫ БЕЗ ТОЧЕК (ДЛЯ РАБОТЫ НА ХОСТИНГЕ) ---
 from access_guard import (
     CHECK_ACCESS_CALLBACK,
     build_access_keyboard,
@@ -64,50 +64,94 @@ from nurture import (
 )
 from utils import render_text, user_first_name
 
-# --- ИНИЦИАЛИЗАЦИЯ РОУТЕРА ---
+# --- ИНИЦИАЛИЗАЦИЯ ---
 router = Router()
 logger = logging.getLogger(__name__)
 analytics_service: AnalyticsService | None = None
+
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def track_user(user: object) -> None:
     if analytics_service and user is not None:
         analytics_service.identify_user(user)
 
+
 def track_event(user: object, event_type: str, *, step: str | None = None, payload: dict | None = None) -> None:
     if analytics_service and user is not None:
         analytics_service.track_event(user, event_type=event_type, step=step, payload=payload)
 
-async def send_missing_media_notice(target: Message | CallbackQuery) -> None:
-    text = "Ошибка: изображения не найдены в папке assets."
-    if isinstance(target, CallbackQuery): await target.message.answer(text)
-    else: await target.answer(text)
 
-# --- ХЕНДЛЕР ЗАЯВОК ---
+async def send_missing_media_notice(target: Message | CallbackQuery) -> None:
+    text = "Не удалось найти изображения. Проверьте папку assets."
+    if isinstance(target, CallbackQuery):
+        await target.message.answer(text)
+    else:
+        await target.answer(text)
+
+
+# --- ЛОГИКА ТОВАРОВ ---
+async def send_product_album(callback: CallbackQuery, product_id: str, source: str, config: Config) -> None:
+    product = PRODUCTS[product_id]
+    name = user_first_name(callback.from_user)
+    caption = render_text(product.album_caption, name=name)
+    caption = append_payment_note(caption)
+    try:
+        await callback.bot.send_chat_action(chat_id=callback.message.chat.id, action=ChatAction.UPLOAD_PHOTO)
+        await send_album(bot=callback.bot, chat_id=callback.message.chat.id, base_dir=config.project_dir,
+                         relative_dir=product.asset_dir, caption=caption)
+    except Exception:
+        await send_missing_media_notice(callback)
+        return
+    await callback.message.answer("Выбери цвет своего планеры 🎨",
+                                  reply_markup=choose_color_keyboard(product_id, source, "product"))
+
+
+# --- ОБРАБОТКА ЗАЯВОК (ВАЖНО) ---
 @router.chat_join_request()
 async def on_chat_join_request(join_request: ChatJoinRequest) -> None:
     register_join_request(join_request.chat.id, join_request.from_user.id)
+    logger.info(f"Заявка от {join_request.from_user.id} сохранена")
+
 
 # --- КОМАНДЫ ---
 @router.message(Command("start"))
 async def command_start(message: Message) -> None:
     track_user(message.from_user)
+
+    # Проверка подписки при каждом старте
     has_access = await has_channel_access(message.bot, message.from_user.id)
     if not has_access:
-        await message.answer(start_access_text(user_first_name(message.from_user)), reply_markup=build_access_keyboard())
+        name = user_first_name(message.from_user)
+        await message.answer(start_access_text(name), reply_markup=build_access_keyboard())
     else:
         await message.answer(CATALOG_TEXT, reply_markup=planners_keyboard("main"))
+
     await notify_admins_about_start(message.bot, message.from_user)
 
+
+@router.message(Command("menu"))
+async def command_menu(message: Message) -> None:
+    has_access = await has_channel_access(message.bot, message.from_user.id)
+    if not has_access:
+        await message.answer(start_access_text(user_first_name(message.from_user)),
+                             reply_markup=build_access_keyboard())
+        return
+    await message.answer(CATALOG_TEXT, reply_markup=planners_keyboard("main"))
+
+
+# --- CALLBACK ОБРАБОТЧИКИ ---
 @router.callback_query(F.data == CHECK_ACCESS_CALLBACK)
 async def check_access_handler(callback: CallbackQuery) -> None:
     has_access = await has_channel_access(callback.bot, callback.from_user.id)
     if not has_access:
+        # Мгновенный ответ, чтобы не было ошибки таймаута
         await callback.answer("Заявка не найдена! ❌", show_alert=True)
         await callback.message.answer(retry_access_text(), reply_markup=build_access_keyboard())
         return
+
     await callback.answer("Доступ открыт! ✅", show_alert=True)
     await callback.message.answer(CATALOG_TEXT, reply_markup=planners_keyboard("main"))
+
 
 @router.callback_query(F.data == "catalog")
 async def open_catalog(callback: CallbackQuery) -> None:
@@ -118,7 +162,19 @@ async def open_catalog(callback: CallbackQuery) -> None:
     await callback.answer()
     await callback.message.answer(CATALOG_TEXT, reply_markup=planners_keyboard("main"))
 
-# --- ЗАПУСК ---
+
+@router.callback_query(F.data.startswith("product:"))
+async def open_product(callback: CallbackQuery, config: Config) -> None:
+    has_access = await has_channel_access(callback.bot, callback.from_user.id)
+    if not has_access:
+        await callback.answer("Нет доступа ❌", show_alert=True)
+        return
+    await callback.answer("Загружаю...")
+    _, product_id, source = callback.data.split(":", maxsplit=2)
+    await send_product_album(callback, product_id, source, config)
+
+
+# --- ЗАПУСК БОТА ---
 async def on_startup(bot: Bot, config: Config) -> None:
     global analytics_service
     analytics_service = AnalyticsService(config.analytics_db_path)
@@ -127,6 +183,11 @@ async def on_startup(bot: Bot, config: Config) -> None:
     setup_access_guard(config)
     setup_nurture(analytics_service, bot)
     await bot.delete_webhook(drop_pending_updates=True)
+    await bot.set_my_commands([
+        BotCommand(command="start", description="Запустить бота"),
+        BotCommand(command="menu", description="Каталог")
+    ])
+
 
 async def main() -> None:
     config = Config.load()
@@ -134,9 +195,12 @@ async def main() -> None:
     dp = Dispatcher()
     dp.include_router(admin_router)
     dp.include_router(router)
+
     await on_startup(bot, config)
-    # polling с поддержкой chat_join_request
+    logger.info("Bot started successfully")
+    # Обязательно разрешаем chat_join_request
     await dp.start_polling(bot, allowed_updates=["message", "callback_query", "chat_join_request"], config=config)
+
 
 if __name__ == "__main__":
     with suppress(KeyboardInterrupt):
