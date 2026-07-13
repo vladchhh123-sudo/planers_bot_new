@@ -838,4 +838,3 @@ async def callback_admin_export_events(callback: CallbackQuery) -> None:
     await callback.answer("Готовлю файл…")
     export_path = analytics_service.export_events_csv(config.data_dir / "exports")
     await callback.message.answer_document(FSInputFile(export_path), caption="CSV с событиями")
-

@@ -313,4 +313,3 @@ async def _process_due_reminders() -> None:
             logger.exception("Failed to send nurture reminder %s to %s", reminder["code"], item["user_id"])
         finally:
             _analytics.mark_nurture_sent(item["user_id"], reminder["code"])
-

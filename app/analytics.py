@@ -581,4 +581,3 @@ class AnalyticsService:
             writer.writeheader()
             writer.writerows(events)
         return file_path
-
