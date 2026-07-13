@@ -142,7 +142,6 @@ async def send_bundle_album(callback: CallbackQuery, bundle_id: str, config: Con
     bundle = BUNDLES[bundle_id]
     caption = append_payment_note(bundle.album_caption)
     chat_id = callback.message.chat.id
-
     try:
         await callback.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
         await send_album(
@@ -167,28 +166,9 @@ async def send_bundle_album(callback: CallbackQuery, bundle_id: str, config: Con
 
 
 async def send_offer_album(callback: CallbackQuery, config: Config) -> None:
-    track_event(callback.from_user, "callback", payload={"data": callback.data})
-    name = user_first_name(callback.from_user)
-    caption = render_text(CHANNEL_OFFER_CAPTION, name=name)
-    caption = append_payment_note(caption)
-    chat_id = callback.message.chat.id
-
-    try:
-        await callback.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
-        await send_album(
-            bot=callback.bot,
-            chat_id=chat_id,
-            base_dir=config.project_dir,
-            relative_dir="assets/channel_offer",
-            caption=caption,
-        )
-    except MediaNotFoundError:
-        logger.exception("Media not found for channel offer")
-        await send_missing_media_notice(callback)
-        return
-
-    track_step(callback.from_user, "offer_channel_plus")
-    await callback.message.answer("Выбери следующий шаг 👇", reply_markup=offer_keyboard())
+    # Канал ПЛАНИРУЙ+ больше не используется.
+    # Кнопка предложения теперь ведёт сразу в наборы.
+    await open_bundles(callback)
 
 
 async def send_product_payment(callback: CallbackQuery, product_id: str, color_id: str) -> None:
@@ -215,7 +195,15 @@ async def send_bundle_payment(callback: CallbackQuery, bundle_id: str, color_id:
 
 @router.chat_join_request()
 async def on_chat_join_request(join_request: ChatJoinRequest) -> None:
-    register_join_request(join_request.chat.id, join_request.from_user.id)
+    invite_url = None
+    if join_request.invite_link is not None:
+        invite_url = join_request.invite_link.invite_link
+    register_join_request(
+        join_request.chat.id,
+        join_request.from_user.id,
+        getattr(join_request.chat, "title", None),
+        invite_url,
+    )
 
 
 @router.message(Command("start"))
@@ -288,19 +276,8 @@ async def open_offer(callback: CallbackQuery, config: Config) -> None:
 
 @router.callback_query(F.data == "offer:channel")
 async def open_channel_payment(callback: CallbackQuery) -> None:
-    has_access = await has_channel_access(callback.bot, callback.from_user.id)
-    if not has_access:
-        await callback.answer("Сначала подай заявку и попробуй ещё раз", show_alert=True)
-        await callback.message.answer(retry_access_text(), reply_markup=build_access_keyboard())
-        return
-
-    track_event(callback.from_user, "callback", payload={"data": callback.data})
-    await callback.answer()
-    name = user_first_name(callback.from_user)
-    text = render_text(PAYMENT_TEXT_CHANNEL, name=name, url=CHANNEL_URL)
-    text = append_payment_note(text)
-    track_step(callback.from_user, "pay_channel_offer")
-    await callback.message.answer(text, reply_markup=url_button(BTN_JOIN_CHANNEL, CHANNEL_URL))
+    # Старый путь на канал ПЛАНИРУЙ+ заменён на наборы.
+    await open_bundles(callback)
 
 
 @router.callback_query(F.data == "offer:single")
@@ -347,7 +324,6 @@ async def open_bundles(callback: CallbackQuery) -> None:
     await callback.answer()
     name = user_first_name(callback.from_user)
     text = render_text(BUNDLES_LANDING_TEXT, name=name)
-    text = append_payment_note(text)
     track_step(callback.from_user, "bundles_landing")
     track_bundle_landing_context(callback.from_user)
     await callback.message.answer(text, reply_markup=bundles_keyboard())
