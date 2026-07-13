@@ -6,7 +6,6 @@ from typing import Any
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-# ИМПОРТ БЕЗ ТОЧКИ
 from config import Config
 
 logger = logging.getLogger(__name__)

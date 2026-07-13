@@ -10,7 +10,6 @@ from aiogram.enums import ChatAction, ParseMode
 from aiogram.filters import Command
 from aiogram.types import BotCommand, CallbackQuery, ChatJoinRequest, Message
 
-# --- ИМПОРТЫ БЕЗ ТОЧЕК (ДЛЯ РАБОТЫ НА ХОСТИНГЕ) ---
 from access_guard import (
     CHECK_ACCESS_CALLBACK,
     build_access_keyboard,
