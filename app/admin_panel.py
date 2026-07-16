@@ -518,6 +518,380 @@ async def command_support_answer(message: Message) -> None:
         )
 
 
+async def send_message_to_users(
+    message: Message,
+    users: list[dict],
+    outgoing_text: str,
+    unresolved: list[str] | None = None,
+) -> None:
+    analytics_service, _ = require_services()
+    sent_count = 0
+    failed: list[str] = []
+
+    for user in users:
+        try:
+            await message.bot.send_message(chat_id=user["user_id"], text=outgoing_text)
+            analytics_service.mark_user_blocked(user["user_id"], False)
+            sent_count += 1
+        except Exception as exc:
+            error_text = str(exc)
+            if "bot was blocked by the user" in error_text.lower() or "forbidden" in error_text.lower():
+                analytics_service.mark_user_blocked(user["user_id"], True)
+            username = user.get("username") or "—"
+            failed.append(f"{user['user_id']} (@{username}): {error_text}")
+
+    report_lines = [
+        "<b>Результат рассылки</b>",
+        f"Найдено получателей: <b>{len(users)}</b>",
+        f"Успешно отправлено: <b>{sent_count}</b>",
+    ]
+
+    if unresolved:
+        report_lines.append("")
+        report_lines.append("<b>Не найдены в базе:</b>")
+        for item in unresolved:
+            report_lines.append(f"• <code>{html.escape(item)}</code>")
+
+    if failed:
+        report_lines.append("")
+        report_lines.append("<b>Ошибки доставки:</b>")
+        for item in failed[:20]:
+            report_lines.append(f"• {html.escape(item)}")
+        if len(failed) > 20:
+            report_lines.append(f"• И ещё {len(failed) - 20} ошибок")
+
+    await message.answer("\n".join(report_lines), reply_markup=admin_keyboard())
+
+
+@router.message(Command("admin"))
+async def command_admin(message: Message) -> None:
+    _, config = require_services()
+
+    if not has_password():
+        await message.answer("ADMIN_PASSWORD не настроен в переменных окружения.")
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+
+    if is_admin(message.from_user.id):
+        await message.answer(build_admin_help_text(), reply_markup=admin_keyboard())
+        return
+
+    if len(parts) < 2:
+        _pending_admin_auth_users.add(message.from_user.id)
+        await message.answer("Введи пароль следующим сообщением или используй формат <code>/admin ТВОЙ_ПАРОЛЬ</code>")
+        return
+
+    password = parts[1].strip()
+    if password != config.admin_password:
+        await message.answer("Неверный пароль.")
+        return
+
+    _authorized_users.add(message.from_user.id)
+    _pending_admin_auth_users.discard(message.from_user.id)
+    await message.answer(
+        "✅ Доступ к админ-панели открыт.\n\n" + build_admin_help_text(),
+        reply_markup=admin_keyboard(),
+    )
+
+
+@router.message(lambda message: message.from_user is not None and message.from_user.id in _pending_admin_auth_users)
+async def handle_admin_password(message: Message) -> None:
+    _, config = require_services()
+
+    if not message.text or message.text.startswith("/"):
+        await message.answer("Пожалуйста, отправь пароль обычным текстом.")
+        return
+
+    password = message.text.strip()
+    if password != config.admin_password:
+        await message.answer("Неверный пароль. Попробуй ещё раз или снова используй /admin")
+        return
+
+    _authorized_users.add(message.from_user.id)
+    _pending_admin_auth_users.discard(message.from_user.id)
+    await message.answer(
+        "✅ Доступ к админ-панели открыт.\n\n" + build_admin_help_text(),
+        reply_markup=admin_keyboard(),
+    )
+
+
+@router.message(Command("admin_logout"))
+async def command_admin_logout(message: Message) -> None:
+    _authorized_users.discard(message.from_user.id)
+    _pending_admin_auth_users.discard(message.from_user.id)
+    await message.answer("Ты вышел из админ-панели.")
+
+
+@router.message(Command("notify_on"))
+async def command_notify_on(message: Message) -> None:
+    if not await ensure_admin_message(message):
+        return
+
+    _notify_enabled_users.add(message.from_user.id)
+    _save_notify_users()
+    await message.answer(
+        "✅ Уведомления о новых входах в бота включены.",
+        reply_markup=admin_keyboard(),
+    )
+
+
+@router.message(Command("notify_off"))
+async def command_notify_off(message: Message) -> None:
+    if not await ensure_admin_message(message):
+        return
+
+    _notify_enabled_users.discard(message.from_user.id)
+    _save_notify_users()
+    await message.answer(
+        "🔕 Уведомления о новых входах в бота выключены.",
+        reply_markup=admin_keyboard(),
+    )
+
+
+@router.message(Command("stats"))
+async def command_stats(message: Message) -> None:
+    if not await ensure_admin_message(message):
+        return
+    analytics_service, _ = require_services()
+    await message.answer(format_summary_text(analytics_service.get_summary()), reply_markup=admin_keyboard())
+
+
+@router.message(Command("funnel"))
+async def command_funnel(message: Message) -> None:
+    if not await ensure_admin_message(message):
+        return
+    analytics_service, _ = require_services()
+    funnel = analytics_service.get_funnel()
+    if not funnel:
+        await message.answer("Пока нет данных по воронке.", reply_markup=admin_keyboard())
+        return
+    await message.answer(format_funnel_text(funnel), reply_markup=admin_keyboard())
+
+
+@router.message(Command("users"))
+async def command_users(message: Message) -> None:
+    if not await ensure_admin_message(message):
+        return
+    analytics_service, _ = require_services()
+
+    parts = (message.text or "").split(maxsplit=1)
+    limit = 20
+    if len(parts) > 1 and parts[1].isdigit():
+        limit = int(parts[1])
+
+    users = analytics_service.get_recent_users(limit=limit)
+    if not users:
+        await message.answer("Пользователей пока нет.", reply_markup=admin_keyboard())
+        return
+
+    blocks = [f"<b>👥 Последние {min(limit, len(users))} пользователей</b>"]
+    blocks.extend(format_user_line(user) for user in users)
+    for chunk in chunk_text(blocks):
+        await message.answer(chunk)
+
+
+@router.message(Command("user"))
+async def command_user(message: Message) -> None:
+    if not await ensure_admin_message(message):
+        return
+    analytics_service, _ = require_services()
+
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("Используй так: <code>/user 123456789</code> или <code>/user @username</code>")
+        return
+
+    details = analytics_service.get_user_details(parts[1].strip())
+    if not details:
+        await message.answer("Такой пользователь не найден.")
+        return
+
+    user = details["user"]
+    events = details["events"]
+    status = "неактивен" if user.get("bot_blocked") else "активен"
+    lines = [
+        "<b>Карточка пользователя</b>",
+        f"ID: <code>{user['user_id']}</code>",
+        f"Username: @{html.escape(user.get('username') or '—')}",
+        f"Имя: {html.escape(user.get('first_name') or '—')}",
+        f"Статус: {status}",
+        f"Первый визит: {html.escape(user.get('first_seen') or '—')}",
+        f"Последний визит: {html.escape(user.get('last_seen') or '—')}",
+        f"Последний шаг: {html.escape(humanize_step(user.get('last_step')))}",
+        f"Кол-во /start: <b>{user.get('start_count') or 0}</b>",
+        "",
+        "<b>Последние события:</b>",
+    ]
+    for event in events:
+        lines.append(
+            f"• {html.escape(event['created_at'])} | "
+            f"<code>{html.escape(event['event_type'])}</code> | "
+            f"{html.escape(humanize_step(event.get('step')))}"
+        )
+
+    text = "\n".join(lines)
+    if len(text) > 3900:
+        text = text[:3900] + "\n…"
+    await message.answer(text)
+
+
+@router.message(Command("segment"))
+async def command_segment(message: Message) -> None:
+    if not await ensure_admin_message(message):
+        return
+    analytics_service, _ = require_services()
+
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer(segments_help_text(), reply_markup=admin_keyboard())
+        return
+
+    alias = parts[1].strip().lower()
+    segment = get_segment(alias)
+    if segment is None:
+        await message.answer("Неизвестный сегмент.\n\n" + segments_help_text(), reply_markup=admin_keyboard())
+        return
+
+    step, description = segment
+    users = analytics_service.get_users_by_step(step, limit=500)
+    if not users:
+        await message.answer(f"По сегменту «{html.escape(alias)}» пользователей пока нет.", reply_markup=admin_keyboard())
+        return
+
+    blocks = [f"<b>{html.escape(description)}</b>\nВсего: <b>{len(users)}</b>"]
+    blocks.extend(format_user_line(user) for user in users)
+    for chunk in chunk_text(blocks):
+        await message.answer(chunk)
+
+
+@router.message(Command("channels"))
+@router.message(F.text.regexp(r"^/channels(?:@\w+)?$"))
+async def command_channels(message: Message) -> None:
+    if not await ensure_admin_message(message):
+        return
+    await message.answer(channels_help_text(), reply_markup=admin_keyboard())
+
+
+@router.message(Command("add_channel"))
+@router.message(F.text.regexp(r"^/add_channel(?:@\w+)?\s+"))
+async def command_add_channel(message: Message) -> None:
+    if not await ensure_admin_message(message):
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer(
+            "Используй так: <code>/add_channel https://t.me/+example</code>",
+            reply_markup=admin_keyboard(),
+        )
+        return
+
+    invite_url = parts[1].strip()
+    if not invite_url.startswith("https://t.me/"):
+        await message.answer(
+            "Укажи корректную ссылку вида <code>https://t.me/+example</code>",
+            reply_markup=admin_keyboard(),
+        )
+        return
+
+    created = add_required_channel(invite_url)
+    if not created:
+        await message.answer("Этот канал уже добавлен.", reply_markup=admin_keyboard())
+        return
+
+    await message.answer("✅ Канал добавлен в обязательные.", reply_markup=admin_keyboard())
+    await message.answer(channels_help_text(), reply_markup=admin_keyboard())
+
+
+@router.message(Command("remove_channel"))
+@router.message(F.text.regexp(r"^/remove_channel(?:@\w+)?\s+"))
+async def command_remove_channel(message: Message) -> None:
+    if not await ensure_admin_message(message):
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer(
+            "Используй так: <code>/remove_channel 1</code>",
+            reply_markup=admin_keyboard(),
+        )
+        return
+
+    removed = remove_required_channel(parts[1].strip())
+    if not removed:
+        await message.answer("Не удалось удалить канал. Проверь номер или ссылку.", reply_markup=admin_keyboard())
+        return
+
+    await message.answer("✅ Канал удалён.", reply_markup=admin_keyboard())
+    await message.answer(channels_help_text(), reply_markup=admin_keyboard())
+
+
+@router.message(Command("support"))
+async def command_support(message: Message) -> None:
+    name = html.escape(getattr(message.from_user, "first_name", None) or "друг")
+    _pending_support_users.add(message.from_user.id)
+    await message.answer(build_support_prompt(name))
+
+
+@router.message(lambda message: message.from_user is not None and message.from_user.id in _pending_support_users)
+async def handle_support_message(message: Message) -> None:
+    if not message.text or message.text.startswith("/"):
+        await message.answer("Пожалуйста, отправь сообщение обычным текстом.")
+        return
+
+    _pending_support_users.discard(message.from_user.id)
+    await notify_admins_about_support(message.bot, message.from_user, message.text)
+    await message.answer(build_support_success())
+
+
+@router.message(Command("support_answer"))
+async def command_support_answer(message: Message) -> None:
+    if not await ensure_admin_message(message):
+        return
+
+    body = (message.text or "").split(maxsplit=1)
+    if len(body) < 2 or "|" not in body[1]:
+        await message.answer(
+            "Используй так: <code>/support_answer 123456789 | Текст ответа</code>\n"
+            "или <code>/support_answer @username | Текст ответа</code>"
+        )
+        return
+
+    target_raw, reply_text = body[1].split("|", maxsplit=1)
+    target_raw = target_raw.strip()
+    reply_text = reply_text.strip()
+
+    if not target_raw or not reply_text:
+        await message.answer(
+            "Используй так: <code>/support_answer 123456789 | Текст ответа</code>\n"
+            "или <code>/support_answer @username | Текст ответа</code>"
+        )
+        return
+
+    analytics_service, _ = require_services()
+    users, unresolved = analytics_service.find_users_by_refs([target_raw])
+    if not users:
+        unresolved_text = ", ".join(unresolved) if unresolved else target_raw
+        await message.answer(f"Не удалось найти пользователя: <code>{html.escape(unresolved_text)}</code>")
+        return
+
+    user = users[0]
+    target_id = user["user_id"]
+
+    try:
+        await message.bot.send_message(
+            chat_id=target_id,
+            text=f"<b>Ответ поддержки</b>\n\n{html.escape(reply_text)}",
+        )
+        await message.answer(f"✅ Ответ отправлен пользователю <code>{target_id}</code>")
+    except Exception as exc:
+        await message.answer(
+            f"Не удалось отправить ответ пользователю <code>{target_id}</code>\n\n"
+            f"Ошибка: <code>{html.escape(str(exc))}</code>"
+        )
+
+
 @router.message(Command("send"))
 async def command_send(message: Message) -> None:
     if not await ensure_admin_message(message):
