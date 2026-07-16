@@ -35,6 +35,7 @@ _authorized_users: set[int] = set()
 _notify_enabled_users: set[int] = set()
 _notify_state_file: Path | None = None
 _pending_support_users: set[int] = set()
+_pending_admin_auth_users: set[int] = set()
 
 PRODUCT_NAMES = {
     "habits": "Планер привычек",
@@ -196,6 +197,30 @@ def require_services() -> tuple[AnalyticsService, Config]:
     if _analytics_service is None or _config is None:
         raise RuntimeError("Admin panel is not initialized")
     return _analytics_service, _config
+
+
+def build_admin_help_text() -> str:
+    return (
+        "<b>Админ-панель ПЛАНИРУЙ</b>\n\n"
+        "Доступные команды:\n"
+        "/stats — общая статистика\n"
+        "/funnel — воронка\n"
+        "/users — последние пользователи\n"
+        "/user ID_ИЛИ_@username — карточка пользователя\n"
+        "/segment alias — список пользователей по шагу\n"
+        "/channels — список обязательных каналов\n"
+        "/add_channel ссылка — добавить канал\n"
+        "/remove_channel номер — удалить канал\n"
+        "/send получатели | текст — рассылка по ID/username\n"
+        "/send_segment alias | текст — рассылка по сегменту\n"
+        "/support_answer ID_ИЛИ_@username | текст — ответ на обращение\n"
+        "/reset_nurture ID_ИЛИ_@username — сбросить прогрев\n"
+        "/notify_on — включить уведомления о новых входах\n"
+        "/notify_off — выключить уведомления о новых входах\n"
+        "/export_users — CSV с пользователями\n"
+        "/export_events — CSV с событиями\n"
+        "/admin_logout — выйти из админки"
+    )
 
 
 def humanize_step(step: str | None) -> str:
