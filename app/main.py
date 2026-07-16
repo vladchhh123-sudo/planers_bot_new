@@ -33,6 +33,7 @@ from .catalog import (
     PAYMENT_TEXT_SINGLE,
     PLANNERS_LIST_BLOCK,
     PRODUCTS,
+    START_TEXT,
 )
 from .config import Config
 from .keyboards import (
@@ -44,6 +45,7 @@ from .keyboards import (
     offer_fallback_keyboard,
     planner_post_color_keyboard,
     planners_keyboard,
+    start_keyboard,
     url_button,
 )
 from .media import MediaNotFoundError, send_album
@@ -323,7 +325,6 @@ async def open_bundles(callback: CallbackQuery) -> None:
     await callback.answer()
     name = user_first_name(callback.from_user)
     text = render_text(BUNDLES_LANDING_TEXT, name=name)
-    text = append_payment_note(text)
     track_step(callback.from_user, "bundles_landing")
     track_bundle_landing_context(callback.from_user)
     await callback.message.answer(text, reply_markup=bundles_keyboard())
@@ -409,10 +410,7 @@ async def choose_color(callback: CallbackQuery) -> None:
         )
         track_step(callback.from_user, f"after_color_{item_id}_{color_id}")
         track_product_context(callback.from_user, item_id)
-        await callback.message.answer(
-            text,
-            reply_markup=planner_post_color_keyboard(item_id, color_id),
-        )
+        await callback.message.answer(text, reply_markup=planner_post_color_keyboard(item_id, color_id))
         return
 
     if kind == "bundle":
@@ -451,6 +449,7 @@ async def on_startup(bot: Bot, config: Config) -> None:
     commands = [
         BotCommand(command="start", description="Запустить бота"),
         BotCommand(command="menu", description="Открыть каталог планеров"),
+        BotCommand(command="support", description="Написать в поддержку"),
     ]
     await bot.set_my_commands(commands)
 
